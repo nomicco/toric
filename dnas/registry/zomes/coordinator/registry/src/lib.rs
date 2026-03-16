@@ -6,8 +6,9 @@ use registry_integrity::{
     Attestation,
     Warrant as RegistryWarrant,
 };
-pub mod blobs;
 
+pub mod blobs;
+use blobs::*;
 
 #[hdk_extern]
 pub fn init(_: ()) -> ExternResult<InitCallbackResult> {
@@ -15,24 +16,24 @@ pub fn init(_: ()) -> ExternResult<InitCallbackResult> {
 }
 
 // ─────────────────────────────────────────────
-// Input / Output types
+// Input types — typed blobs
 // ─────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CreateManifestInput {
-    pub metadata_blob: SerializedBytes,
+    pub blob: ManifestBlob,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CreateAttestationInput {
     pub manifest_hash: ActionHash,
-    pub metadata_blob: SerializedBytes,
+    pub blob: AttestationBlob,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CreateWarrantInput {
     pub manifest_hash: ActionHash,
-    pub metadata_blob: SerializedBytes,
+    pub blob: WarrantBlob,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -49,7 +50,7 @@ pub struct ReputationScore {
 }
 
 // ─────────────────────────────────────────────
-// Helper — fetch links for a base + link type
+// Helper
 // ─────────────────────────────────────────────
 
 fn fetch_links(base: impl Into<AnyLinkableHash>, link_type: LinkTypes) -> ExternResult<Vec<Link>> {
@@ -60,15 +61,26 @@ fn fetch_links(base: impl Into<AnyLinkableHash>, link_type: LinkTypes) -> Extern
     get_links(query, GetStrategy::Network)
 }
 
+fn links_to_records(links: Vec<Link>) -> ExternResult<Vec<Record>> {
+    let mut records = Vec::new();
+    for link in links {
+        if let Some(action_hash) = link.target.into_action_hash() {
+            if let Some(record) = get(action_hash, GetOptions::default())? {
+                records.push(record);
+            }
+        }
+    }
+    Ok(records)
+}
+
 // ─────────────────────────────────────────────
 // Create Manifest
 // ─────────────────────────────────────────────
 
 #[hdk_extern]
 pub fn create_manifest(input: CreateManifestInput) -> ExternResult<ActionHash> {
-    let manifest = Manifest {
-        metadata_blob: input.metadata_blob,
-    };
+    let metadata_blob = encode_manifest_blob(&input.blob)?;
+    let manifest = Manifest { metadata_blob };
     let action_hash = create_entry(EntryTypes::Manifest(manifest))?;
     let agent = agent_info()?.agent_initial_pubkey;
     create_link(agent, action_hash.clone(), LinkTypes::AgentToManifest, ())?;
@@ -81,9 +93,10 @@ pub fn create_manifest(input: CreateManifestInput) -> ExternResult<ActionHash> {
 
 #[hdk_extern]
 pub fn create_attestation(input: CreateAttestationInput) -> ExternResult<ActionHash> {
+    let metadata_blob = encode_attestation_blob(&input.blob)?;
     let attestation = Attestation {
         manifest_hash: input.manifest_hash.clone(),
-        metadata_blob: input.metadata_blob,
+        metadata_blob,
     };
     let action_hash = create_entry(EntryTypes::Attestation(attestation))?;
     create_link(
@@ -101,9 +114,10 @@ pub fn create_attestation(input: CreateAttestationInput) -> ExternResult<ActionH
 
 #[hdk_extern]
 pub fn create_warrant(input: CreateWarrantInput) -> ExternResult<ActionHash> {
+    let metadata_blob = encode_warrant_blob(&input.blob)?;
     let warrant = RegistryWarrant {
         manifest_hash: input.manifest_hash.clone(),
-        metadata_blob: input.metadata_blob,
+        metadata_blob,
     };
     let action_hash = create_entry(EntryTypes::Warrant(warrant))?;
     create_link(
@@ -124,29 +138,17 @@ pub fn get_manifest(action_hash: ActionHash) -> ExternResult<Option<Record>> {
     get(action_hash, GetOptions::default())
 }
 
-// ─────────────────────────────────────────────
-// Get all manifests for an agent
-// ─────────────────────────────────────────────
-
 #[hdk_extern]
 pub fn get_agent_manifests(agent: AgentPubKey) -> ExternResult<Vec<Record>> {
     let links = fetch_links(agent, LinkTypes::AgentToManifest)?;
     links_to_records(links)
 }
 
-// ─────────────────────────────────────────────
-// Get attestations for a manifest
-// ─────────────────────────────────────────────
-
 #[hdk_extern]
 pub fn get_manifest_attestations(manifest_hash: ActionHash) -> ExternResult<Vec<Record>> {
     let links = fetch_links(manifest_hash, LinkTypes::ManifestToAttestation)?;
     links_to_records(links)
 }
-
-// ─────────────────────────────────────────────
-// Get warrants for a manifest
-// ─────────────────────────────────────────────
 
 #[hdk_extern]
 pub fn get_manifest_warrants(manifest_hash: ActionHash) -> ExternResult<Vec<Record>> {
@@ -155,33 +157,13 @@ pub fn get_manifest_warrants(manifest_hash: ActionHash) -> ExternResult<Vec<Reco
 }
 
 // ─────────────────────────────────────────────
-// Helper — resolve link targets to records
-// ─────────────────────────────────────────────
-
-fn links_to_records(links: Vec<Link>) -> ExternResult<Vec<Record>> {
-    let mut records = Vec::new();
-    for link in links {
-        if let Some(action_hash) = link.target.into_action_hash() {
-            if let Some(record) = get(action_hash, GetOptions::default())? {
-                records.push(record);
-            }
-        }
-    }
-    Ok(records)
-}
-
-// ─────────────────────────────────────────────
-// submit_attestation — bridge-callable
+// Bridge-callable functions
 // ─────────────────────────────────────────────
 
 #[hdk_extern]
 pub fn submit_attestation(input: CreateAttestationInput) -> ExternResult<ActionHash> {
     create_attestation(input)
 }
-
-// ─────────────────────────────────────────────
-// compute_reputation_score — bridge-callable, read only
-// ─────────────────────────────────────────────
 
 #[hdk_extern]
 pub fn compute_reputation_score(input: ReputationInput) -> ExternResult<ReputationScore> {
