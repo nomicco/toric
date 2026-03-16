@@ -126,6 +126,7 @@ dependencies = [
  "coordination_integrity",
  "hdk",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
