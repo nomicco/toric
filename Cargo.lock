@@ -676,6 +676,7 @@ dependencies = [
  "hdk",
  "mutual_credit_integrity",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
