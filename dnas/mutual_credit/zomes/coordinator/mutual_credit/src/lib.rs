@@ -1,26 +1,62 @@
 use hdk::prelude::*;
 use mutual_credit_integrity::*;
 
-#[hdk_extern]
-pub fn init(_: ()) -> ExternResult<InitCallbackResult> {
-    Ok(InitCallbackResult::Pass)
+const PHI: f64 = 1.6180339887498948;
+const PHI_SQ: f64 = 2.6180339887498948;
+const INV_PHI: f64 = 0.6180339887498948;
+const INV_PHI_SQ: f64 = 0.3819660112501051;
+const GENESIS_CREDIT_SUPPLY: i64 = 1000;
+const MIN_VALIDATORS: u32 = 3;
+
+fn starting_reputation(network_avg: f64) -> f64 {
+    (network_avg / PHI_SQ).max(0.01)
 }
 
-// ─────────────────────────────────────────────
-// Constants — EIP-1559 style calibration
-// These get adjusted automatically based on
-// network health metrics over time.
-// ─────────────────────────────────────────────
+fn admission_allowance(honest_rep_fraction: f64) -> u32 {
+    if honest_rep_fraction <= INV_PHI {
+        return 0;
+    }
+    let margin = honest_rep_fraction - INV_PHI;
+    ((margin * PHI * 10.0).floor() as u32).max(1)
+}
 
-const INITIAL_CREDIT_LIMIT: i64 = -100;
-const MAX_CREDIT_LIMIT: i64 = -10000;
-const DEPLETION_RATE: f64 = 0.01;       // 1% per period if inactive
-const VALIDATION_REWARD: i64 = 10;      // credits earned per convergent validation
-const DISPUTE_COST_BASE: i64 = 20;      // base cost to file a dispute
+fn expand_credit_supply(current: i64) -> i64 {
+    (current as f64 * PHI).floor() as i64
+}
 
-// ─────────────────────────────────────────────
-// Input / Output types
-// ─────────────────────────────────────────────
+fn base_reward_unit(credit_supply: i64, validator_count: u32) -> f64 {
+    credit_supply as f64 / (validator_count as f64 * 10.0)
+}
+
+fn next_fibonacci(n: u64) -> u64 {
+    let mut a: u64 = 1;
+    let mut b: u64 = 1;
+    loop {
+        let c = a + b;
+        if c > n { return c; }
+        a = b;
+        b = c;
+    }
+}
+
+fn compute_network_avg_reputation(
+    registry_cell_id: CellId,
+    agents: Vec<AgentPubKey>,
+) -> f64 {
+    if agents.is_empty() { return 0.5; }
+    let total: f64 = agents.iter().filter_map(|agent| {
+        get_reputation_score(agent.clone(), registry_cell_id.clone()).ok()
+    }).sum();
+    total / agents.len() as f64
+}
+
+fn default_credit_limit() -> i64 {
+    -((GENESIS_CREDIT_SUPPLY as f64 * INV_PHI_SQ) as i64)
+}
+
+fn validation_reward(credit_supply: i64, validator_count: u32) -> i64 {
+    base_reward_unit(credit_supply, validator_count) as i64
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CreateAccountInput {
@@ -57,10 +93,6 @@ pub struct RewardValidatorInput {
     pub agent: AgentPubKey,
 }
 
-// ─────────────────────────────────────────────
-// Helper — fetch links
-// ─────────────────────────────────────────────
-
 fn fetch_links(
     base: impl Into<AnyLinkableHash>,
     link_type: LinkTypes,
@@ -68,10 +100,6 @@ fn fetch_links(
     let query = LinkQuery::new(base.into(), link_type.try_into_filter()?);
     get_links(query, GetStrategy::Network)
 }
-
-// ─────────────────────────────────────────────
-// Helper — get reputation score via bridge call
-// ─────────────────────────────────────────────
 
 fn get_reputation_score(agent: AgentPubKey, registry_cell_id: CellId) -> ExternResult<f64> {
     #[derive(Serialize, Deserialize, Debug)]
@@ -107,20 +135,11 @@ fn get_reputation_score(agent: AgentPubKey, registry_cell_id: CellId) -> ExternR
     }
 }
 
-// ─────────────────────────────────────────────
-// Helper — compute credit limit from reputation
-// Higher reputation = higher credit capacity
-// ─────────────────────────────────────────────
-
 fn compute_credit_limit(reputation_score: f64) -> i64 {
-    let range = (MAX_CREDIT_LIMIT - INITIAL_CREDIT_LIMIT).abs() as f64;
-    let limit = INITIAL_CREDIT_LIMIT as f64 - (reputation_score * range);
-    limit.max(MAX_CREDIT_LIMIT as f64) as i64
+    let limit = -((GENESIS_CREDIT_SUPPLY as f64 * INV_PHI_SQ
+        + reputation_score * GENESIS_CREDIT_SUPPLY as f64 * PHI) as i64);
+    limit.max(-10000)
 }
-
-// ─────────────────────────────────────────────
-// Helper — compute balance from transaction chain
-// ─────────────────────────────────────────────
 
 fn compute_balance(agent: &AgentPubKey) -> ExternResult<i64> {
     let links = fetch_links(agent.clone(), LinkTypes::AgentToTransactions)?;
@@ -144,29 +163,41 @@ fn compute_balance(agent: &AgentPubKey) -> ExternResult<i64> {
     Ok(balance)
 }
 
-// ─────────────────────────────────────────────
-// Create Account
-// Called when a new agent joins the network
-// ─────────────────────────────────────────────
+fn get_current_credit_limit(agent: &AgentPubKey) -> ExternResult<i64> {
+    let links = fetch_links(agent.clone(), LinkTypes::AgentToCreditLimit)?;
+
+    if let Some(link) = links.last() {
+        if let Some(action_hash) = link.target.clone().into_action_hash() {
+            if let Some(record) = get(action_hash, GetOptions::default())? {
+                if let Some(entry) = record.entry().as_option() {
+                    if let Ok(credit_limit) = CreditLimit::try_from(entry) {
+                        return Ok(credit_limit.limit);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(default_credit_limit())
+}
+
+#[hdk_extern]
+pub fn init(_: ()) -> ExternResult<InitCallbackResult> {
+    Ok(InitCallbackResult::Pass)
+}
 
 #[hdk_extern]
 pub fn create_account(input: CreateAccountInput) -> ExternResult<ActionHash> {
     let agent = agent_info()?.agent_initial_pubkey;
     let account = Account {
         agent: agent.clone(),
-        credit_limit: INITIAL_CREDIT_LIMIT,
+        credit_limit: default_credit_limit(),
         metadata_blob: input.metadata_blob,
     };
     let action_hash = create_entry(EntryTypes::Account(account))?;
     create_link(agent, action_hash.clone(), LinkTypes::AgentToAccount, ())?;
     Ok(action_hash)
 }
-
-// ─────────────────────────────────────────────
-// Transact
-// Move credits between agents
-// Enforces credit limit before writing
-// ─────────────────────────────────────────────
 
 #[hdk_extern]
 pub fn transact(input: TransactInput) -> ExternResult<ActionHash> {
@@ -178,13 +209,12 @@ pub fn transact(input: TransactInput) -> ExternResult<ActionHash> {
         )));
     }
 
-    // Check sender has enough capacity
     let balance = compute_balance(&from_agent)?;
     let credit_limit = get_current_credit_limit(&from_agent)?;
 
     if balance - input.amount < credit_limit {
         return Err(wasm_error!(WasmErrorInner::Guest(
-            "Transaction would exceed credit limit — account frozen or insufficient capacity".to_string()
+            "Transaction would exceed credit limit".to_string()
         )));
     }
 
@@ -196,27 +226,10 @@ pub fn transact(input: TransactInput) -> ExternResult<ActionHash> {
     };
 
     let action_hash = create_entry(EntryTypes::Transaction(tx))?;
-
-    // Link to both agents for traversal
-    create_link(
-        from_agent,
-        action_hash.clone(),
-        LinkTypes::AgentToTransactions,
-        (),
-    )?;
-    create_link(
-        input.to_agent,
-        action_hash.clone(),
-        LinkTypes::AgentToTransactions,
-        (),
-    )?;
-
+    create_link(from_agent, action_hash.clone(), LinkTypes::AgentToTransactions, ())?;
+    create_link(input.to_agent, action_hash.clone(), LinkTypes::AgentToTransactions, ())?;
     Ok(action_hash)
 }
-
-// ─────────────────────────────────────────────
-// Get Balance
-// ─────────────────────────────────────────────
 
 #[hdk_extern]
 pub fn get_balance(input: GetBalanceInput) -> ExternResult<BalanceResult> {
@@ -231,36 +244,6 @@ pub fn get_balance(input: GetBalanceInput) -> ExternResult<BalanceResult> {
         is_frozen,
     })
 }
-
-// ─────────────────────────────────────────────
-// Get current credit limit for an agent
-// ─────────────────────────────────────────────
-
-fn get_current_credit_limit(agent: &AgentPubKey) -> ExternResult<i64> {
-    let links = fetch_links(agent.clone(), LinkTypes::AgentToCreditLimit)?;
-
-    // Get the most recent credit limit entry
-    if let Some(link) = links.last() {
-        if let Some(action_hash) = link.target.clone().into_action_hash() {
-            if let Some(record) = get(action_hash, GetOptions::default())? {
-                if let Some(entry) = record.entry().as_option() {
-                    if let Ok(credit_limit) = CreditLimit::try_from(entry) {
-                        return Ok(credit_limit.limit);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(INITIAL_CREDIT_LIMIT)
-}
-
-// ─────────────────────────────────────────────
-// Update Credit Limit
-// Called after reputation changes.
-// Pulls latest reputation from Registry
-// via bridge call and updates credit limit.
-// ─────────────────────────────────────────────
 
 #[hdk_extern]
 pub fn update_credit_limit(input: UpdateCreditLimitInput) -> ExternResult<ActionHash> {
@@ -295,29 +278,18 @@ pub fn update_credit_limit(input: UpdateCreditLimitInput) -> ExternResult<Action
     };
 
     let action_hash = create_entry(EntryTypes::CreditLimit(credit_limit))?;
-    create_link(
-        input.agent,
-        action_hash.clone(),
-        LinkTypes::AgentToCreditLimit,
-        (),
-    )?;
+    create_link(input.agent, action_hash.clone(), LinkTypes::AgentToCreditLimit, ())?;
     Ok(action_hash)
 }
 
-// ─────────────────────────────────────────────
-// Reward Validator
-// Called after a convergent validation.
-// Issues credits to the validator.
-// ─────────────────────────────────────────────
-
 #[hdk_extern]
 pub fn reward_validator(input: RewardValidatorInput) -> ExternResult<ActionHash> {
-    let from_agent = agent_info()?.agent_initial_pubkey;
+    let reward = validation_reward(GENESIS_CREDIT_SUPPLY, MIN_VALIDATORS);
 
     let metadata = {
         let json = serde_json::json!({
             "reward_type": "validation_convergence",
-            "amount": VALIDATION_REWARD,
+            "amount": reward,
         });
         let bytes = serde_json::to_vec(&json).map_err(|e| {
             wasm_error!(WasmErrorInner::Guest(format!(
@@ -329,14 +301,10 @@ pub fn reward_validator(input: RewardValidatorInput) -> ExternResult<ActionHash>
 
     transact(TransactInput {
         to_agent: input.agent,
-        amount: VALIDATION_REWARD,
+        amount: reward,
         metadata_blob: metadata,
     })
 }
-
-// ─────────────────────────────────────────────
-// Signals
-// ─────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]

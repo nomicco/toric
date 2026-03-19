@@ -241,7 +241,11 @@ pub fn submit_evaluation(input: SubmitEvaluationInput) -> ExternResult<ActionHas
 
 #[hdk_extern]
 pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
-    // Get all evaluations for this request
+    const PHI: f64 = 1.6180339887498948;
+    const PHI_SQ: f64 = 2.6180339887498948;
+    const INV_PHI: f64 = 0.6180339887498948;
+    const MIN_VALIDATORS: u32 = 3;
+
     let eval_links = fetch_links(
         input.request_hash.clone(),
         LinkTypes::RequestToEvaluation,
@@ -256,33 +260,30 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
         });
     }
 
-    // Get the registry cell id for bridge calls
     let registry_cell_id = {
         let agent = agent_info()?.agent_initial_pubkey;
         let dna_info = dna_info()?;
-        // Registry DNA hash is stored in properties
-        // For now we derive it from cell info
-        // This will be refined when we have multi-cell calls working
         CellId::new(dna_info.hash, agent)
     };
 
-    // Collect evaluations with reputation weights
+    // Collect all validator reputations to compute total network reputation
     let mut evaluations: Vec<EvaluationRecord> = Vec::new();
-    let mut combined_weight: f64 = 0.0;
+    let mut total_network_reputation: f64 = 0.0;
     let mut passing_weight: f64 = 0.0;
+    let mut combined_weight: f64 = 0.0;
 
     for link in eval_links {
         if let Some(eval_hash) = link.target.into_action_hash() {
             if let Some(record) = get(eval_hash, GetOptions::default())? {
                 if let Some(entry) = record.entry().as_option() {
                     if let Ok(bundle) = EvaluationBundle::try_from(entry) {
-                        // Get reputation weight for this evaluator
                         let weight = get_reputation_score(
                             bundle.evaluator.clone(),
                             registry_cell_id.clone(),
                         ).unwrap_or(0.5);
 
-                        // Decode the evaluation blob
+                        total_network_reputation += weight;
+
                         let raw: Vec<u8> = UnsafeBytes::from(
                             bundle.metadata_blob.clone()
                         ).into();
@@ -311,8 +312,11 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
         }
     }
 
-    // Check if passing evaluations reach quorum threshold
-    let quorum_reached = passing_weight >= QUORUM_THRESHOLD
+    // φ-derived quorum threshold = total_reputation / φ²
+    // This is scale-invariant — same fraction at every network size
+    let quorum_threshold = total_network_reputation / PHI_SQ;
+
+    let quorum_reached = passing_weight >= quorum_threshold
         && evaluations.len() >= MIN_VALIDATORS as usize;
 
     if !quorum_reached {
@@ -324,16 +328,16 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
         });
     }
 
-    // Build quorum bundle
-    let eval_hashes: Vec<ActionHash> = evaluations.iter()
-        .filter_map(|_| None) // placeholder — will collect hashes properly
-        .collect();
+    // Build and store quorum bundle
+    let eval_hashes: Vec<ActionHash> = vec![];
 
     let quorum_blob = {
         let json = serde_json::json!({
             "evaluations": evaluations.len(),
             "combined_weight": combined_weight,
             "passing_weight": passing_weight,
+            "quorum_threshold": quorum_threshold,
+            "phi_sq": PHI_SQ,
         });
         let bytes = serde_json::to_vec(&json).map_err(|e| {
             wasm_error!(WasmErrorInner::Guest(format!(
@@ -358,16 +362,14 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
         (),
     )?;
 
-    // Get the manifest hash from the original request
     if let Some(record) = get(input.request_hash, GetOptions::default())? {
         if let Some(entry) = record.entry().as_option() {
             if let Ok(request) = ValidationRequest::try_from(entry) {
-                // Fire bridge call to Registry
                 submit_attestation_to_registry(
                     request.manifest_hash,
                     quorum_blob,
                     registry_cell_id,
-                ).ok(); // best effort — quorum bundle is already written
+                ).ok();
             }
         }
     }

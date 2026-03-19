@@ -167,18 +167,38 @@ pub fn submit_attestation(input: CreateAttestationInput) -> ExternResult<ActionH
 
 #[hdk_extern]
 pub fn compute_reputation_score(input: ReputationInput) -> ExternResult<ReputationScore> {
-    let manifest_links = fetch_links(input.agent.clone(), LinkTypes::AgentToManifest)?;
+    const PHI: f64 = 1.6180339887498948;
+    const PHI_SQ: f64 = 2.6180339887498948;
+    const LEARNING_RATE: f64 = 0.1;
+
+    let agent_manifests = fetch_links(input.agent.clone(), LinkTypes::AgentToManifest)?;
 
     let mut total_attestations: u32 = 0;
     let mut total_warrants: u32 = 0;
 
-    for link in manifest_links {
+    for link in agent_manifests {
         if let Some(manifest_hash) = link.target.into_action_hash() {
+            // Only count attestations from OTHER agents — exclude self-attestation
             let attestation_links = fetch_links(
                 manifest_hash.clone(),
                 LinkTypes::ManifestToAttestation,
             )?;
-            total_attestations += attestation_links.len() as u32;
+
+            for att_link in &attestation_links {
+                if let Some(att_hash) = att_link.target.clone().into_action_hash() {
+                    if let Some(record) = get(att_hash, GetOptions::default())? {
+                        // Only count if attesting agent != manifest owner
+                        let attesting_agent = record
+                            .signed_action()
+                            .action()
+                            .author()
+                            .clone();
+                        if attesting_agent != input.agent {
+                            total_attestations += 1;
+                        }
+                    }
+                }
+            }
 
             let warrant_links = fetch_links(
                 manifest_hash,
@@ -188,13 +208,27 @@ pub fn compute_reputation_score(input: ReputationInput) -> ExternResult<Reputati
         }
     }
 
+    // φ-derived reputation from fixed point of closure recursion
+    // Start at 0.5 neutral, converge toward fixed point based on
+    // attestation/warrant history
     let score = if total_attestations == 0 && total_warrants == 0 {
-        0.5
+        0.5 // neutral — no history yet
     } else {
         let total = (total_attestations + total_warrants) as f64;
-        let attestation_ratio = total_attestations as f64 / total;
-        let warrant_penalty = (total_warrants as f64 * 2.0) / total;
-        (attestation_ratio - warrant_penalty).max(0.0).min(1.0)
+
+        // Each attestation moves reputation (1/φ) of the distance toward 1.0
+        // Each warrant moves reputation (1/φ) of the distance toward 0.0
+        // This is the same update rule as the simulation
+        let mut rep: f64 = 0.5;
+        for _ in 0..total_attestations {
+            let delta = (1.0 - rep) / PHI;
+            rep = (rep + delta * LEARNING_RATE).clamp(0.01, 0.99);
+        }
+        for _ in 0..total_warrants {
+            let delta = rep / PHI; // moves toward 0.0
+            rep = (rep - delta * LEARNING_RATE * 2.0).clamp(0.01, 0.99);
+        }
+        rep
     };
 
     Ok(ReputationScore {
