@@ -1,11 +1,5 @@
 use hdi::prelude::*;
 
-// ─────────────────────────────────────────────
-// Entry Types
-// Sum-zero accounting enforced through POI
-// attestation not UTXO.
-// ─────────────────────────────────────────────
-
 #[hdk_entry_helper]
 #[derive(Clone)]
 pub struct Account {
@@ -32,6 +26,15 @@ pub struct CreditLimit {
     pub metadata_blob: SerializedBytes,
 }
 
+#[hdk_entry_helper]
+#[derive(Clone)]
+pub struct NetworkState {
+    pub attestation_count: u64,
+    pub next_fibonacci_threshold: u64,
+    pub credit_supply: i64,
+    pub cycle: u64,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[hdk_entry_types]
@@ -40,22 +43,16 @@ pub enum EntryTypes {
     Account(Account),
     Transaction(Transaction),
     CreditLimit(CreditLimit),
+    NetworkState(NetworkState),
 }
-
-// ─────────────────────────────────────────────
-// Link Types
-// ─────────────────────────────────────────────
 
 #[hdk_link_types]
 pub enum LinkTypes {
     AgentToAccount,
     AgentToTransactions,
     AgentToCreditLimit,
+    NetworkStateAnchor,
 }
-
-// ─────────────────────────────────────────────
-// Genesis + Agent Joining
-// ─────────────────────────────────────────────
 
 #[hdk_extern]
 pub fn genesis_self_check(
@@ -70,10 +67,6 @@ pub fn validate_agent_joining(
 ) -> ExternResult<ValidateCallbackResult> {
     Ok(ValidateCallbackResult::Valid)
 }
-
-// ─────────────────────────────────────────────
-// Entry Validators
-// ─────────────────────────────────────────────
 
 fn validate_create_account(
     _action: Create,
@@ -101,40 +94,33 @@ fn validate_create_credit_limit(
     Ok(ValidateCallbackResult::Valid)
 }
 
-// ─────────────────────────────────────────────
-// Link Validators
-// ─────────────────────────────────────────────
+fn validate_create_network_state(
+    _action: Create,
+    state: NetworkState,
+) -> ExternResult<ValidateCallbackResult> {
+    if state.next_fibonacci_threshold == 0 {
+        return Ok(ValidateCallbackResult::Invalid(
+            "Fibonacci threshold cannot be zero".to_string(),
+        ));
+    }
+    Ok(ValidateCallbackResult::Valid)
+}
 
 fn validate_create_link_agent_to_account(
-    _action: CreateLink,
-    _base_address: AnyLinkableHash,
-    _target_address: AnyLinkableHash,
-    _tag: LinkTag,
-) -> ExternResult<ValidateCallbackResult> {
-    Ok(ValidateCallbackResult::Valid)
-}
+    _action: CreateLink, _base: AnyLinkableHash, _target: AnyLinkableHash, _tag: LinkTag,
+) -> ExternResult<ValidateCallbackResult> { Ok(ValidateCallbackResult::Valid) }
 
 fn validate_create_link_agent_to_transactions(
-    _action: CreateLink,
-    _base_address: AnyLinkableHash,
-    _target_address: AnyLinkableHash,
-    _tag: LinkTag,
-) -> ExternResult<ValidateCallbackResult> {
-    Ok(ValidateCallbackResult::Valid)
-}
+    _action: CreateLink, _base: AnyLinkableHash, _target: AnyLinkableHash, _tag: LinkTag,
+) -> ExternResult<ValidateCallbackResult> { Ok(ValidateCallbackResult::Valid) }
 
 fn validate_create_link_agent_to_credit_limit(
-    _action: CreateLink,
-    _base_address: AnyLinkableHash,
-    _target_address: AnyLinkableHash,
-    _tag: LinkTag,
-) -> ExternResult<ValidateCallbackResult> {
-    Ok(ValidateCallbackResult::Valid)
-}
+    _action: CreateLink, _base: AnyLinkableHash, _target: AnyLinkableHash, _tag: LinkTag,
+) -> ExternResult<ValidateCallbackResult> { Ok(ValidateCallbackResult::Valid) }
 
-// ─────────────────────────────────────────────
-// Validation Dispatcher
-// ─────────────────────────────────────────────
+fn validate_create_link_network_state_anchor(
+    _action: CreateLink, _base: AnyLinkableHash, _target: AnyLinkableHash, _tag: LinkTag,
+) -> ExternResult<ValidateCallbackResult> { Ok(ValidateCallbackResult::Valid) }
 
 #[hdk_extern]
 pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
@@ -142,90 +128,66 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
 
         FlatOp::StoreEntry(OpEntry::CreateEntry { app_entry, action }) => {
             match app_entry {
-                EntryTypes::Account(account) =>
-                    validate_create_account(action, account),
-                EntryTypes::Transaction(transaction) =>
-                    validate_create_transaction(action, transaction),
-                EntryTypes::CreditLimit(credit_limit) =>
-                    validate_create_credit_limit(action, credit_limit),
+                EntryTypes::Account(a) => validate_create_account(action, a),
+                EntryTypes::Transaction(t) => validate_create_transaction(action, t),
+                EntryTypes::CreditLimit(c) => validate_create_credit_limit(action, c),
+                EntryTypes::NetworkState(s) => validate_create_network_state(action, s),
             }
         }
 
         FlatOp::StoreEntry(OpEntry::UpdateEntry { .. }) =>
-            Ok(ValidateCallbackResult::Invalid(
-                "Mutual credit entries are immutable".to_string(),
-            )),
+            Ok(ValidateCallbackResult::Invalid("Mutual credit entries are immutable".to_string())),
 
         FlatOp::RegisterUpdate(_) =>
-            Ok(ValidateCallbackResult::Invalid(
-                "Mutual credit entries are immutable".to_string(),
-            )),
+            Ok(ValidateCallbackResult::Invalid("Mutual credit entries are immutable".to_string())),
 
         FlatOp::RegisterDelete(_) =>
-            Ok(ValidateCallbackResult::Invalid(
-                "Mutual credit entries are immutable".to_string(),
-            )),
+            Ok(ValidateCallbackResult::Invalid("Mutual credit entries are immutable".to_string())),
 
-        FlatOp::RegisterCreateLink {
-            link_type,
-            base_address,
-            target_address,
-            tag,
-            action,
-        } => match link_type {
-            LinkTypes::AgentToAccount =>
-                validate_create_link_agent_to_account(action, base_address, target_address, tag),
-            LinkTypes::AgentToTransactions =>
-                validate_create_link_agent_to_transactions(action, base_address, target_address, tag),
-            LinkTypes::AgentToCreditLimit =>
-                validate_create_link_agent_to_credit_limit(action, base_address, target_address, tag),
-        },
+        FlatOp::RegisterCreateLink { link_type, base_address, target_address, tag, action } =>
+            match link_type {
+                LinkTypes::AgentToAccount =>
+                    validate_create_link_agent_to_account(action, base_address, target_address, tag),
+                LinkTypes::AgentToTransactions =>
+                    validate_create_link_agent_to_transactions(action, base_address, target_address, tag),
+                LinkTypes::AgentToCreditLimit =>
+                    validate_create_link_agent_to_credit_limit(action, base_address, target_address, tag),
+                LinkTypes::NetworkStateAnchor =>
+                    validate_create_link_network_state_anchor(action, base_address, target_address, tag),
+            },
 
         FlatOp::RegisterDeleteLink { .. } =>
-            Ok(ValidateCallbackResult::Invalid(
-                "Mutual credit links are permanent".to_string(),
-            )),
+            Ok(ValidateCallbackResult::Invalid("Mutual credit links are permanent".to_string())),
 
         FlatOp::StoreRecord(OpRecord::CreateEntry { app_entry, action }) => {
             match app_entry {
-                EntryTypes::Account(account) =>
-                    validate_create_account(action, account),
-                EntryTypes::Transaction(transaction) =>
-                    validate_create_transaction(action, transaction),
-                EntryTypes::CreditLimit(credit_limit) =>
-                    validate_create_credit_limit(action, credit_limit),
+                EntryTypes::Account(a) => validate_create_account(action, a),
+                EntryTypes::Transaction(t) => validate_create_transaction(action, t),
+                EntryTypes::CreditLimit(c) => validate_create_credit_limit(action, c),
+                EntryTypes::NetworkState(s) => validate_create_network_state(action, s),
             }
         }
 
         FlatOp::StoreRecord(OpRecord::UpdateEntry { .. }) =>
-            Ok(ValidateCallbackResult::Invalid(
-                "Mutual credit entries are immutable".to_string(),
-            )),
+            Ok(ValidateCallbackResult::Invalid("Mutual credit entries are immutable".to_string())),
 
         FlatOp::StoreRecord(OpRecord::DeleteEntry { .. }) =>
-            Ok(ValidateCallbackResult::Invalid(
-                "Mutual credit entries are immutable".to_string(),
-            )),
+            Ok(ValidateCallbackResult::Invalid("Mutual credit entries are immutable".to_string())),
 
-        FlatOp::StoreRecord(OpRecord::CreateLink {
-            base_address,
-            target_address,
-            tag,
-            link_type,
-            action,
-        }) => match link_type {
-            LinkTypes::AgentToAccount =>
-                validate_create_link_agent_to_account(action, base_address, target_address, tag),
-            LinkTypes::AgentToTransactions =>
-                validate_create_link_agent_to_transactions(action, base_address, target_address, tag),
-            LinkTypes::AgentToCreditLimit =>
-                validate_create_link_agent_to_credit_limit(action, base_address, target_address, tag),
-        },
+        FlatOp::StoreRecord(OpRecord::CreateLink { base_address, target_address, tag, link_type, action }) =>
+            match link_type {
+                LinkTypes::AgentToAccount =>
+                    validate_create_link_agent_to_account(action, base_address, target_address, tag),
+                LinkTypes::AgentToTransactions =>
+                    validate_create_link_agent_to_transactions(action, base_address, target_address, tag),
+                LinkTypes::AgentToCreditLimit =>
+                    validate_create_link_agent_to_credit_limit(action, base_address, target_address, tag),
+                LinkTypes::NetworkStateAnchor =>
+                    validate_create_link_network_state_anchor(action, base_address, target_address, tag),
+            },
 
         FlatOp::StoreRecord(OpRecord::DeleteLink { .. }) =>
-            Ok(ValidateCallbackResult::Invalid(
-                "Mutual credit links are permanent".to_string(),
-            )),
+            Ok(ValidateCallbackResult::Invalid("Mutual credit links are permanent".to_string())),
 
         FlatOp::RegisterAgentActivity(OpActivity::CreateAgent { agent, action }) => {
             let previous_action = must_get_action(action.prev_action)?;

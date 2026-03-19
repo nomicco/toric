@@ -326,3 +326,136 @@ pub fn post_commit(committed_actions: Vec<SignedActionHashed>) {
 fn signal_action(_action: SignedActionHashed) -> ExternResult<()> {
     Ok(())
 }
+
+// ─────────────────────────────────────────────
+// Network State — anchor path for DHT lookup
+// ─────────────────────────────────────────────
+
+const NETWORK_STATE_ANCHOR: &str = "network_state";
+const BOOTSTRAP_ATTESTATIONS: u64 = 21;
+
+fn get_network_state_anchor() -> ExternResult<EntryHash> {
+    let path = Path::from(NETWORK_STATE_ANCHOR);
+    path.path_entry_hash()
+}
+
+fn get_current_network_state() -> ExternResult<Option<NetworkState>> {
+    let anchor = get_network_state_anchor()?;
+    let links = fetch_links(anchor, LinkTypes::NetworkStateAnchor)?;
+
+    // Most recent state is last link
+    if let Some(link) = links.last() {
+        if let Some(hash) = link.target.clone().into_action_hash() {
+            if let Some(record) = get(hash, GetOptions::default())? {
+                if let Some(entry) = record.entry().as_option() {
+                    if let Ok(state) = NetworkState::try_from(entry) {
+                        return Ok(Some(state));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn write_network_state(state: NetworkState) -> ExternResult<ActionHash> {
+    let anchor = get_network_state_anchor()?;
+    let action_hash = create_entry(EntryTypes::NetworkState(state))?;
+    create_link(anchor, action_hash.clone(), LinkTypes::NetworkStateAnchor, ())?;
+    Ok(action_hash)
+}
+
+// ─────────────────────────────────────────────
+// on_attestation_created
+// Called by Coordination DNA via bridge after
+// every successful quorum. Increments attestation
+// count and fires Fibonacci expansion if threshold
+// is crossed.
+// ─────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AttestationNotification {
+    pub attestation_hash: ActionHash,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FibonacciResult {
+    pub attestation_count: u64,
+    pub threshold_crossed: bool,
+    pub new_credit_supply: Option<i64>,
+    pub admission_allowance: Option<u32>,
+    pub next_threshold: u64,
+}
+
+#[hdk_extern]
+pub fn on_attestation_created(input: AttestationNotification) -> ExternResult<FibonacciResult> {
+    // Get or initialize network state
+    let current = get_current_network_state()?;
+
+    let (attestation_count, credit_supply, cycle) = match current {
+        Some(ref s) => (s.attestation_count + 1, s.credit_supply, s.cycle),
+        None => (1, GENESIS_CREDIT_SUPPLY, 0),
+    };
+
+    let current_threshold = match current {
+        Some(ref s) => s.next_fibonacci_threshold,
+        None => BOOTSTRAP_ATTESTATIONS,
+    };
+
+    // Check if we crossed a Fibonacci threshold
+    if attestation_count >= current_threshold {
+        // Expand credit supply by φ
+        let new_supply = expand_credit_supply(credit_supply);
+        let next_threshold = next_fibonacci(attestation_count);
+
+        // Write new network state
+        let new_state = NetworkState {
+            attestation_count,
+            next_fibonacci_threshold: next_threshold,
+            credit_supply: new_supply,
+            cycle: cycle + 1,
+        };
+        write_network_state(new_state)?;
+
+        // Compute admission allowance
+        // In production this would query honest rep fraction from Registry
+        // For now use a conservative default of 0.8
+        let honest_rep_fraction = 0.8_f64;
+        let allowance = admission_allowance(honest_rep_fraction);
+
+        Ok(FibonacciResult {
+            attestation_count,
+            threshold_crossed: true,
+            new_credit_supply: Some(new_supply),
+            admission_allowance: Some(allowance),
+            next_threshold,
+        })
+    } else {
+        // No threshold crossed — just update count
+        let next_threshold = current_threshold;
+        let new_state = NetworkState {
+            attestation_count,
+            next_fibonacci_threshold: next_threshold,
+            credit_supply,
+            cycle,
+        };
+        write_network_state(new_state)?;
+
+        Ok(FibonacciResult {
+            attestation_count,
+            threshold_crossed: false,
+            new_credit_supply: None,
+            admission_allowance: None,
+            next_threshold,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────
+// get_network_state — readable by any agent
+// ─────────────────────────────────────────────
+
+#[hdk_extern]
+pub fn get_network_state(_: ()) -> ExternResult<Option<NetworkState>> {
+    get_current_network_state()
+}
