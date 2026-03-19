@@ -185,18 +185,12 @@ pub fn compute_reputation_score(input: ReputationInput) -> ExternResult<Reputati
             )?;
 
             for att_link in &attestation_links {
-                if let Some(att_hash) = att_link.target.clone().into_action_hash() {
-                    if let Some(record) = get(att_hash, GetOptions::default())? {
-                        // Only count if attesting agent != manifest owner
-                        let attesting_agent = record
-                            .signed_action()
-                            .action()
-                            .author()
-                            .clone();
-                        if attesting_agent != input.agent {
-                            total_attestations += 1;
-                        }
-                    }
+                // Author of the link creation = the attesting agent
+                // This avoids a network fetch and works even if the
+                // target record hasn't synced yet
+                let attesting_agent = att_link.author.clone();
+                if attesting_agent != input.agent {
+                    total_attestations += 1;
                 }
             }
 
