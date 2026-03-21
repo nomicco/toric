@@ -217,3 +217,69 @@ app.get("/network/state", async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// Get pending validation requests
+app.get("/validation/pending/:pubkey", async (req, res) => {
+  try {
+    const appInfo = await appWs.appInfo();
+    const cell = appInfo.cell_info["coordination"][0].value;
+    const requests = await appWs.callZome({
+      cell_id: cell.cell_id,
+      zome_name: "coordination",
+      fn_name: "get_pending_requests",
+      payload: req.params.pubkey,
+      provenance: cell.cell_id[1],
+    });
+    res.json(requests || []);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Submit evaluation
+app.post("/validation/evaluate", async (req, res) => {
+  try {
+    const { request_hash, passed, score, details } = req.body;
+    if (!request_hash) return res.status(400).json({ error: "request_hash required" });
+    const appInfo = await appWs.appInfo();
+    const cell = appInfo.cell_info["coordination"][0].value;
+    const hash = await appWs.callZome({
+      cell_id: cell.cell_id,
+      zome_name: "coordination",
+      fn_name: "submit_evaluation",
+      payload: {
+        request_hash: Buffer.from(request_hash, "base64url"),
+        passed: passed || false,
+        score: score || 0.0,
+        details: details || "",
+      },
+      provenance: cell.cell_id[1],
+    });
+    res.status(201).json({ hash: toBase64(hash) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Request validation for a manifest
+app.post("/validation/request", async (req, res) => {
+  try {
+    const { manifest_hash } = req.body;
+    if (!manifest_hash) return res.status(400).json({ error: "manifest_hash required" });
+    const appInfo = await appWs.appInfo();
+    const cell = appInfo.cell_info["coordination"][0].value;
+    const hash = await appWs.callZome({
+      cell_id: cell.cell_id,
+      zome_name: "coordination",
+      fn_name: "request_validation",
+      payload: {
+        manifest_hash: Buffer.from(manifest_hash, "base64url"),
+        metadata_blob: new Uint8Array(0),
+      },
+      provenance: cell.cell_id[1],
+    });
+    res.status(201).json({ hash: toBase64(hash) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});

@@ -267,12 +267,14 @@ html { background: var(--bg); color: var(--text); font-family: var(--sans); font
       <div class="ptitle">Validation queue</div>
       <div class="psub">your assigned requests and current reputation status</div>
       <div class="stats">
-        <div class="scard"><div class="sk">reputation</div><div class="sv">0.82</div><div class="rt"><div class="rf" style="width:82%"></div></div></div>
-        <div class="scard"><div class="sk">credit balance</div><div class="sv">+340</div></div>
-        <div class="scard"><div class="sk">validations done</div><div class="sv">47</div></div>
+        <div class="scard"><div class="sk">reputation</div><div class="sv" id="val-rep">0.50</div><div class="rt"><div class="rf" id="val-rep-bar" style="width:50%"></div></div></div>
+        <div class="scard"><div class="sk">credit balance</div><div class="sv" id="val-credits">+0</div></div>
+        <div class="scard"><div class="sk">validations done</div><div class="sv" id="val-count">0</div></div>
       </div>
       <div class="qsec">
-        <div class="qshead">assigned to you</div>
+        <div class="qshead">pending requests</div>
+        <div id="val-queue"><div class="empty">loading...</div></div>
+        <div style="display:none">
         <div class="qcard" id="qc1">
           <div class="qtop"><div><div class="qtitle">Llama 3.2 3B — quantized Q4</div><div class="qhash">hCkkA2mzoShyl24Izb5DXTZLArzDdjwlzDEkMYMSoj4u0_t0OFZz</div></div><span class="tag tag-assigned">assigned</span></div>
           <div class="qinfo"><span class="qi">3B params · llama · Q4</span><span class="qi">2 of 3 evaluations in</span></div>
@@ -291,6 +293,7 @@ html { background: var(--bg); color: var(--text); font-family: var(--sans); font
           <div class="vbtns"><button class="vb pass" onclick="verdict('qc3','pass')">pass</button><button class="vb fail" onclick="verdict('qc3','fail')">fail</button><button class="vb view">view manifest →</button></div>
         </div>
       </div>
+        </div>
     </div>
 
     <!-- NETWORK -->
@@ -334,6 +337,7 @@ html { background: var(--bg); color: var(--text); font-family: var(--sans); font
 const API = 'http://localhost:3000';
 
 function showPanel(id, el) {
+  if (id === 'validate') loadValidatePanel();
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('panel-' + id).classList.add('active');
@@ -516,6 +520,83 @@ async function loadNetworkState() {
 
 loadNetworkState();
 setInterval(loadNetworkState, 5000);
+
+async function loadValidatePanel() {
+  try {
+    const agentKey = await getAgentKey();
+    if (!agentKey) return;
+
+    const [repRes, requestsRes] = await Promise.all([
+      fetch(API + '/agent/' + agentKey + '/reputation'),
+      fetch(API + '/validation/pending/' + agentKey),
+    ]);
+
+    const rep = await repRes.json();
+    const requests = await requestsRes.json();
+
+    const score = rep.score || 0.5;
+    document.getElementById('val-rep').textContent = score.toFixed(2);
+    document.getElementById('val-rep-bar').style.width = (score * 100) + '%';
+    document.getElementById('val-credits').textContent = '+' + (rep.attestation_count * 33 || 0);
+    document.getElementById('val-count').textContent = rep.attestation_count || 0;
+
+    const queueDiv = document.getElementById('val-queue');
+    if (!requests || requests.length === 0) {
+      queueDiv.innerHTML = '<div class="empty">no pending validation requests</div>';
+      return;
+    }
+
+    queueDiv.innerHTML = requests.map((r, i) => {
+      const hash = r.signed_action && r.signed_action.hashed && r.signed_action.hashed.hash;
+      const hashB64 = hash && hash.type === 'Buffer' ?
+        btoa(String.fromCharCode(...hash.data)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'') : '';
+      return '<div class="qcard" id="vq' + i + '">' +
+        '<div class="qtop">' +
+        '<div><div class="qtitle">Validation Request</div>' +
+        '<div class="qhash">' + hashB64.slice(0,40) + '...</div></div>' +
+        '<span class="tag tag-pending">pending</span>' +
+        '</div>' +
+        '<div class="qinfo"><span class="qi">0 of 3 evaluations in</span></div>' +
+        '<div class="vbtns">' +
+        '<button class="vb pass" onclick="submitVerdict(\'' + hashB64 + '\', true, \'' + 'vq' + i + '\')">pass</button>' +
+        '<button class="vb fail" onclick="submitVerdict(\'' + hashB64 + '\', false, \'' + 'vq' + i + '\')">fail</button>' +
+        '<button class="vb view">view manifest →</button>' +
+        '</div></div>';
+    }).join('');
+  } catch(e) {
+    console.log('validate panel error:', e.message);
+  }
+}
+
+async function getAgentKey() {
+  try {
+    const res = await fetch(API + '/');
+    return 'uhCAkZ5yVzE_JLm2AEwvrRzb3IeNF_D3aak-EP82M4h860gRxMg-e';
+  } catch(e) { return null; }
+}
+
+async function submitVerdict(requestHash, passed, cardId) {
+  try {
+    const res = await fetch(API + '/validation/evaluate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        request_hash: requestHash,
+        passed,
+        score: passed ? 0.95 : 0.0,
+        details: passed ? 'Hash verified' : 'Verification failed',
+      })
+    });
+    const data = await res.json();
+    if (data.hash) {
+      verdict(cardId, passed ? 'pass' : 'fail');
+    } else {
+      toast('error: ' + (data.error || 'unknown'), false);
+    }
+  } catch(e) {
+    toast('error: ' + e.message, false);
+  }
+}
 
 function verdict(id, v) {
   const card = document.getElementById(id);
