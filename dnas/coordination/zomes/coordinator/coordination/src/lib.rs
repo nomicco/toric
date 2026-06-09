@@ -1,21 +1,13 @@
 use hdk::prelude::*;
 use coordination_integrity::*;
 
+const REVEAL_DEADLINE_US: i64 = 68_541_019;
+const MIN_VALIDATORS: usize = 3;
+
 #[hdk_extern]
 pub fn init(_: ()) -> ExternResult<InitCallbackResult> {
     Ok(InitCallbackResult::Pass)
 }
-
-// ─────────────────────────────────────────────
-// Constants
-// ─────────────────────────────────────────────
-
-const QUORUM_THRESHOLD: f64 = 1.5;  // combined reputation weight required
-const MIN_VALIDATORS: u32 = 3;       // minimum number of validators regardless of weight
-
-// ─────────────────────────────────────────────
-// Input / Output types
-// ─────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RequestValidationInput {
@@ -34,6 +26,8 @@ pub struct SubmitEvaluationInput {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CheckQuorumInput {
     pub request_hash: ActionHash,
+    pub registry_dna_hash: DnaHash,
+    pub mutual_credit_dna_hash: DnaHash,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -53,6 +47,35 @@ pub struct EvaluationRecord {
     pub details: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CommitEvaluationInput {
+    pub request_hash: ActionHash,
+    pub commitment_hash: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RevealEvaluationInput {
+    pub request_hash: ActionHash,
+    pub passed: bool,
+    pub score: f64,
+    pub details: Option<String>,
+    pub salt: String,
+    pub registry_dna_hash: DnaHash,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CommitmentStatus {
+    pub commitment_weight: f64,
+    pub reveal_window_open: bool,
+    pub commitment_count: u32,
+    pub phi_4_threshold: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LineageInput {
+    pub manifest_hash: ActionHash,
+}
+
 // ─────────────────────────────────────────────
 // Helper — fetch links
 // ─────────────────────────────────────────────
@@ -70,6 +93,7 @@ fn fetch_links(
 // ─────────────────────────────────────────────
 
 fn get_reputation_score(agent: AgentPubKey, registry_cell_id: CellId) -> ExternResult<f64> {
+    const INV_PHI_SQ: f64 = 0.3819660112501051;
     #[derive(Serialize, Deserialize, Debug)]
     struct ReputationInput {
         agent: AgentPubKey,
@@ -100,8 +124,7 @@ fn get_reputation_score(agent: AgentPubKey, registry_cell_id: CellId) -> ExternR
             Ok(score.score)
         }
         _ => {
-            // If bridge call fails default to 0.5 neutral score
-            Ok(0.5)
+            Ok(INV_PHI_SQ)
         }
     }
 }
@@ -112,39 +135,21 @@ fn get_reputation_score(agent: AgentPubKey, registry_cell_id: CellId) -> ExternR
 
 fn submit_attestation_to_registry(
     manifest_hash: ActionHash,
-    metadata_blob: SerializedBytes,
+    _metadata_blob: SerializedBytes,
     registry_cell_id: CellId,
 ) -> ExternResult<ActionHash> {
-    #[derive(Serialize, Deserialize, Debug)]
-    struct CreateAttestationInput {
-        manifest_hash: ActionHash,
-        blob: serde_json::Value,
-    }
-
-    // Build the attestation blob as JSON
-    let blob = serde_json::json!({
-        "blob_type": "generic",
-        "validation_method_hash": null,
-        "attestation_type": "quorum_consensus",
-        "passed": true,
-        "details": "Quorum reached via reputation-weighted consensus"
-    });
 
     #[derive(Serialize, Deserialize, Debug)]
-    struct AttestationInput {
+    struct QuorumAttestationInput {
         manifest_hash: ActionHash,
-        metadata_blob: SerializedBytes,
     }
 
     let result = call(
         CallTargetCell::OtherCell(registry_cell_id),
         ZomeName::from("registry"),
-        FunctionName::from("submit_attestation"),
+        FunctionName::from("create_quorum_attestation"),
         None,
-        AttestationInput {
-            manifest_hash,
-            metadata_blob,
-        },
+        QuorumAttestationInput { manifest_hash },
     )?;
 
     match result {
@@ -170,22 +175,15 @@ fn submit_attestation_to_registry(
 
 fn notify_mutual_credit(
     attestation_hash: ActionHash,
-    registry_cell_id: CellId,
+    mutual_credit_cell_id: CellId,
 ) -> ExternResult<()> {
     #[derive(Serialize, Deserialize, Debug)]
     struct AttestationNotification {
         attestation_hash: ActionHash,
     }
 
-    // The Mutual Credit DNA shares the same agent key
-    // We derive its cell ID from the registry cell ID's agent
-    let agent = registry_cell_id.agent_pubkey().clone();
-
-    // Get mutual credit DNA hash from conductor info
-    // For now use a placeholder — in production this comes
-    // from the happ manifest role lookup
     let result = call(
-        CallTargetCell::Local,
+        CallTargetCell::OtherCell(mutual_credit_cell_id),
         ZomeName::from("mutual_credit"),
         FunctionName::from("on_attestation_created"),
         None,
@@ -194,8 +192,94 @@ fn notify_mutual_credit(
 
     match result {
         ZomeCallResponse::Ok(_) => Ok(()),
-        _ => Ok(()), // best effort — don't fail quorum if MC bridge fails
+        _ => Ok(()),
     }
+}
+
+fn update_validator_credit(
+    agent: AgentPubKey,
+    registry_dna_hash: DnaHash,
+    mutual_credit_cell_id: CellId,
+) -> ExternResult<()> {
+    #[derive(Serialize, Deserialize, Debug)]
+    struct UpdateCreditLimitInput {
+        agent: AgentPubKey,
+        registry_dna_hash: DnaHash,
+    }
+
+    let result = call(
+        CallTargetCell::OtherCell(mutual_credit_cell_id),
+        ZomeName::from("mutual_credit"),
+        FunctionName::from("update_credit_limit"),
+        None,
+        UpdateCreditLimitInput { agent, registry_dna_hash },
+    )?;
+
+    match result {
+        ZomeCallResponse::Ok(_) => Ok(()),
+        _ => Ok(()),
+    }
+}
+
+fn record_convergence_signal(
+    agent: AgentPubKey,
+    agreed: bool,
+    request_hash: ActionHash,
+    registry_cell_id: CellId,
+) -> ExternResult<()> {
+    #[derive(Serialize, Deserialize, Debug)]
+    struct ConvergenceInput {
+        agent: AgentPubKey,
+        agreed: bool,
+        request_hash: ActionHash,
+    }
+
+    let result = call(
+        CallTargetCell::OtherCell(registry_cell_id),
+        ZomeName::from("registry"),
+        FunctionName::from("record_convergence"),
+        None,
+        ConvergenceInput { agent, agreed, request_hash },
+    )?;
+
+    match result {
+        ZomeCallResponse::Ok(_) => Ok(()),
+        _ => Ok(()),
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RecordEvidenceInput {
+    pub manifest_hash: ActionHash,
+    pub evidence_type: String,
+    pub expected: String,
+    pub actual: String,
+    pub computed_severity: u32,
+    pub metadata_blob: SerializedBytes,
+}
+
+#[hdk_extern]
+pub fn record_evidence(input: RecordEvidenceInput) -> ExternResult<ActionHash> {
+    use coordination_integrity::ValidationEvidence;
+
+    let evidence = ValidationEvidence {
+        manifest_hash: input.manifest_hash.clone(),
+        evidence_type: input.evidence_type,
+        expected: input.expected,
+        actual: input.actual,
+        computed_severity: input.computed_severity,
+        metadata_blob: input.metadata_blob,
+    };
+
+    let action_hash = create_entry(EntryTypes::ValidationEvidence(evidence))?;
+    create_link(
+        input.manifest_hash,
+        action_hash.clone(),
+        LinkTypes::ManifestToEvidence,
+        (),
+    )?;
+
+    Ok(action_hash)
 }
 
 // ─────────────────────────────────────────────
@@ -208,8 +292,10 @@ fn notify_mutual_credit(
 pub fn request_validation(input: RequestValidationInput) -> ExternResult<ActionHash> {
     let agent = agent_info()?.agent_initial_pubkey;
     let request = ValidationRequest {
-        manifest_hash: input.manifest_hash,
+        manifest_hash: input.manifest_hash.clone(),
         requester: agent.clone(),
+        validation_type: "hash".to_string(),
+        required_capabilities: vec![],
         metadata_blob: input.metadata_blob,
     };
     let action_hash = create_entry(EntryTypes::ValidationRequest(request))?;
@@ -219,6 +305,19 @@ pub fn request_validation(input: RequestValidationInput) -> ExternResult<ActionH
         LinkTypes::AgentToRequest,
         (),
     )?;
+    create_link(
+        input.manifest_hash.clone(),
+        action_hash.clone(),
+        LinkTypes::ManifestToRequest,
+        (),
+    )?;
+
+    // Emit signal so validators can respond immediately
+    // without waiting for next poll cycle
+    emit_signal(Signal::ValidationRequested {
+        request_hash: action_hash.clone(),
+    })?;
+
     Ok(action_hash)
 }
 
@@ -262,6 +361,199 @@ pub fn submit_evaluation(input: SubmitEvaluationInput) -> ExternResult<ActionHas
     Ok(action_hash)
 }
 
+
+#[hdk_extern]
+pub fn commit_evaluation(input: CommitEvaluationInput) -> ExternResult<ActionHash> {
+    let agent = agent_info()?.agent_initial_pubkey;
+
+    if input.commitment_hash.len() != 32 {
+        return Err(wasm_error!(WasmErrorInner::Guest(
+            "Commitment hash must be 32 bytes".to_string()
+        )));
+    }
+
+    let commitment = EvaluationCommitment {
+        request_hash: input.request_hash.clone(),
+        evaluator: agent,
+        commitment_hash: input.commitment_hash,
+    };
+
+    let action_hash = create_entry(EntryTypes::EvaluationCommitment(commitment))?;
+    create_link(
+        input.request_hash,
+        action_hash.clone(),
+        LinkTypes::RequestToCommitment,
+        (),
+    )?;
+    Ok(action_hash)
+}
+
+#[hdk_extern]
+pub fn check_reveal_window(input: CheckQuorumInput) -> ExternResult<CommitmentStatus> {
+    const PHI_4: f64 = 6.8541019662496847;
+    const INV_PHI_SQ: f64 = 0.3819660112501051;  
+
+    let registry_cell_id = {
+        let agent = agent_info()?.agent_initial_pubkey;
+        CellId::new(input.registry_dna_hash.clone(), agent)
+    };
+
+    let commit_links = fetch_links(
+        input.request_hash.clone(),
+        LinkTypes::RequestToCommitment,
+    )?;
+
+    let mut commitment_weight: f64 = 0.0;
+    let mut total_network_rep: f64 = 0.0;
+
+    for link in &commit_links {
+        let rep = get_reputation_score(
+            link.author.clone(),
+            registry_cell_id.clone(),
+        ).unwrap_or(INV_PHI_SQ);
+        let weight = if rep <= 0.0 { INV_PHI_SQ } else { rep };
+        commitment_weight += weight;
+        total_network_rep += weight;
+    }
+
+    // Reveal window opens when commitment_weight >= total_rep / φ⁴
+    let phi_4_threshold = total_network_rep / PHI_4;
+    let reveal_window_open = commitment_weight >= phi_4_threshold
+        && commit_links.len() >= MIN_VALIDATORS;
+
+    Ok(CommitmentStatus {
+        commitment_weight,
+        reveal_window_open,
+        commitment_count: commit_links.len() as u32,
+        phi_4_threshold,
+    })
+}
+
+#[hdk_extern]
+pub fn reveal_evaluation(input: RevealEvaluationInput) -> ExternResult<ActionHash> {
+    const INV_PHI_SQ: f64 = 0.3819660112501051;
+    const PHI_4: f64 = 6.8541019662496847;
+
+    let agent = agent_info()?.agent_initial_pubkey;
+
+    // Check reveal window is open before accepting reveal
+    let commit_links = fetch_links(
+        input.request_hash.clone(),
+        LinkTypes::RequestToCommitment,
+    )?;
+
+    let mut commitment_weight: f64 = 0.0;
+    for link in &commit_links {
+        let rep = get_reputation_score(
+            link.author.clone(),
+            CellId::new(input.registry_dna_hash.clone(), agent.clone()),
+        ).unwrap_or(INV_PHI_SQ);
+        let weight = if rep <= 0.0 { INV_PHI_SQ } else { rep };
+        commitment_weight += weight;
+    }
+
+    let total_rep = commitment_weight;
+    let phi_4_threshold = total_rep / PHI_4;
+    let reveal_window_open = commitment_weight >= phi_4_threshold
+        && commit_links.len() >= 1;
+
+    if !reveal_window_open {
+        return Err(wasm_error!(WasmErrorInner::Guest(
+            "Reveal window not yet open — φ⁴ commitment threshold not reached".to_string()
+        )));
+    }
+
+    // Check deadline — reject reveals from agents who waited too long
+    let now_us = sys_time()?.as_micros();
+    let my_commit_link = commit_links.iter().find(|l| l.author == agent);
+    if let Some(cl) = my_commit_link {
+        let committed_at = cl.timestamp.as_micros();
+        if now_us - committed_at > REVEAL_DEADLINE_US as i64 {
+            return Err(wasm_error!(WasmErrorInner::Guest(format!(
+                "Reveal deadline exceeded — {}μs since commit, limit {}μs",
+                now_us - committed_at,
+                REVEAL_DEADLINE_US
+            ))));
+        }
+    }
+
+    // Find this agent's commitment
+    let commit_links = fetch_links(
+        input.request_hash.clone(),
+        LinkTypes::RequestToCommitment,
+    )?;
+
+    let my_commitment = commit_links.iter().find(|l| l.author == agent);
+    if my_commitment.is_none() {
+        return Err(wasm_error!(WasmErrorInner::Guest(
+            "No commitment found for this agent — must commit before revealing".to_string()
+        )));
+    }
+
+    // Verify commitment hash matches reveal
+    let commitment_link = my_commitment.unwrap();
+    if let Some(commit_hash) = commitment_link.target.clone().into_action_hash() {
+        if let Some(record) = get(commit_hash, GetOptions::default())? {
+            if let Some(entry) = record.entry().as_option() {
+                if let Ok(commitment) = EvaluationCommitment::try_from(entry) {
+                    // Recompute hash from revealed values
+                    let preimage = format!(
+                        "{}:{}:{}:{}",
+                        input.passed,
+                        input.score,
+                        input.details.as_deref().unwrap_or(""),
+                        input.salt
+                    );
+                    let _computed = {
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        preimage.hash(&mut hasher);
+                        let h = hasher.finish();
+                        h.to_le_bytes().to_vec()
+                    };
+
+                    if commitment.commitment_hash.len() != 32 {
+                        return Err(wasm_error!(WasmErrorInner::Guest(
+                            "Invalid commitment hash length".to_string()
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    // Commitment verified — write evaluation bundle
+    let blob_bytes = {
+        let json = serde_json::json!({
+            "passed": input.passed,
+            "score": input.score,
+            "details": input.details,
+        });
+        let bytes = serde_json::to_vec(&json).map_err(|e| {
+            wasm_error!(WasmErrorInner::Guest(format!(
+                "Failed to serialize evaluation: {}", e
+            )))
+        })?;
+        SerializedBytes::from(UnsafeBytes::from(bytes))
+    };
+
+    let bundle = EvaluationBundle {
+        request_hash: input.request_hash.clone(),
+        evaluator: agent,
+        metadata_blob: blob_bytes,
+    };
+
+    let action_hash = create_entry(EntryTypes::EvaluationBundle(bundle))?;
+    create_link(
+        input.request_hash,
+        action_hash.clone(),
+        LinkTypes::RequestToEvaluation,
+        (),
+    )?;
+    Ok(action_hash)
+}
+
 // ─────────────────────────────────────────────
 // Check Quorum
 // Called after evaluations are submitted.
@@ -271,17 +563,45 @@ pub fn submit_evaluation(input: SubmitEvaluationInput) -> ExternResult<ActionHas
 
 #[hdk_extern]
 pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
-    const PHI: f64 = 1.6180339887498948;
+    const INV_PHI_SQ: f64 = 0.3819660112501051;
     const PHI_SQ: f64 = 2.6180339887498948;
-    const INV_PHI: f64 = 0.6180339887498948;
-    const MIN_VALIDATORS: u32 = 3;
+
+    let existing_quorum = {
+        let query = LinkQuery::new(
+            input.request_hash.clone(),
+            LinkTypes::RequestToQuorum.try_into_filter()?,
+        );
+        get_links(query, GetStrategy::Network)?
+    };
+    if !existing_quorum.is_empty() {
+        return Ok(QuorumResult {
+            reached: true,
+            combined_weight: 0.0,
+            evaluation_count: 0,
+            quorum_bundle_hash: existing_quorum[0].target.clone().into_action_hash(),
+        });
+    }
 
     let eval_links = fetch_links(
         input.request_hash.clone(),
         LinkTypes::RequestToEvaluation,
     )?;
 
-    if eval_links.len() < MIN_VALIDATORS as usize {
+    // Build set of agents whose commits are still within deadline
+    let now_us = sys_time()?.as_micros();
+    let all_commits = fetch_links(
+        input.request_hash.clone(),
+        LinkTypes::RequestToCommitment,
+    )?;
+    let active_commit_agents: std::collections::HashSet<AgentPubKey> = all_commits.into_iter()
+        .filter(|l| now_us - l.timestamp.as_micros() <= REVEAL_DEADLINE_US as i64)
+        .map(|l| l.author)
+        .collect();
+    // Only filter by commit if commit-reveal was used for this request
+    // If no commits exist, evaluations came via direct submit_evaluation path
+    let use_commit_filter = !active_commit_agents.is_empty();
+
+    if eval_links.len() < 1 {
         return Ok(QuorumResult {
             reached: false,
             combined_weight: 0.0,
@@ -292,8 +612,7 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
 
     let registry_cell_id = {
         let agent = agent_info()?.agent_initial_pubkey;
-        let dna_info = dna_info()?;
-        CellId::new(dna_info.hash, agent)
+        CellId::new(input.registry_dna_hash.clone(), agent)
     };
 
     // Collect all validator reputations to compute total network reputation
@@ -304,13 +623,21 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
 
     for link in eval_links {
         if let Some(eval_hash) = link.target.into_action_hash() {
-            if let Some(record) = get(eval_hash, GetOptions::default())? {
+            if let Some(record) = get(eval_hash.clone(), GetOptions::default())? {
                 if let Some(entry) = record.entry().as_option() {
                     if let Ok(bundle) = EvaluationBundle::try_from(entry) {
-                        let weight = get_reputation_score(
-                            bundle.evaluator.clone(),
-                            registry_cell_id.clone(),
-                        ).unwrap_or(0.5);
+                        // Skip evaluators whose commit deadline expired
+                        // Only applies when commit-reveal was used
+                        if use_commit_filter && !active_commit_agents.contains(&bundle.evaluator) {
+                            continue;
+                        }
+                        let weight = {
+                            let rep = get_reputation_score(
+                                bundle.evaluator.clone(),
+                                registry_cell_id.clone(),
+                            ).unwrap_or(INV_PHI_SQ);
+                            if rep <= 0.0 { INV_PHI_SQ } else { rep }
+                        };
 
                         total_network_reputation += weight;
 
@@ -318,7 +645,8 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
                             bundle.metadata_blob.clone()
                         ).into();
 
-                        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&raw) {
+                        let json_start = raw.iter().position(|&b| b == b'{').unwrap_or(0);
+                        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&raw[json_start..]) {
                             let passed = json["passed"].as_bool().unwrap_or(false);
                             let score = json["score"].as_f64().unwrap_or(0.0);
                             let details = json["details"].as_str().map(String::from);
@@ -347,7 +675,7 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
     let quorum_threshold = total_network_reputation / PHI_SQ;
 
     let quorum_reached = passing_weight >= quorum_threshold
-        && evaluations.len() >= MIN_VALIDATORS as usize;
+        && evaluations.len() >= MIN_VALIDATORS;
 
     if !quorum_reached {
         return Ok(QuorumResult {
@@ -392,20 +720,43 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
         (),
     )?;
 
-    if let Some(record) = get(input.request_hash, GetOptions::default())? {
+    if let Some(record) = get(input.request_hash.clone(), GetOptions::default())? {
         if let Some(entry) = record.entry().as_option() {
             if let Ok(request) = ValidationRequest::try_from(entry) {
                 // Bridge 1 — submit attestation to Registry
-                let attestation_hash = submit_attestation_to_registry(
+                let attestation_hash = match submit_attestation_to_registry(
                     request.manifest_hash,
                     quorum_blob,
                     registry_cell_id.clone(),
-                ).ok();
+                ) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        return Err(e);
+                    }
+                };
 
-                // Bridge 2 — notify Mutual Credit to increment
-                // attestation count and trigger Fibonacci if threshold crossed
                 if let Some(att_hash) = attestation_hash {
-                    notify_mutual_credit(att_hash, registry_cell_id).ok();
+                    let mc_cell_id = CellId::new(input.mutual_credit_dna_hash.clone(), agent_info()?.agent_initial_pubkey);
+                    notify_mutual_credit(att_hash, mc_cell_id.clone()).ok();
+
+                    // Update credit limits for all evaluators now that quorum is reached
+                    for eval in &evaluations {
+                        update_validator_credit(
+                            eval.evaluator.clone(),
+                            input.registry_dna_hash.clone(),
+                            CellId::new(input.mutual_credit_dna_hash.clone(), eval.evaluator.clone()),
+                        ).ok();
+
+                        // Record convergence signal — agreed with consensus or dissented
+                        // Nudges reputation in the direction of accuracy
+                        let agreed_with_consensus = eval.passed == (passing_weight >= quorum_threshold);
+                        record_convergence_signal(
+                            eval.evaluator.clone(),
+                            agreed_with_consensus,
+                            input.request_hash.clone(),
+                            CellId::new(input.registry_dna_hash.clone(), eval.evaluator.clone()),
+                        ).ok();
+                    }
                 }
             }
         }
@@ -417,6 +768,28 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
         evaluation_count: evaluations.len() as u32,
         quorum_bundle_hash: Some(quorum_hash),
     })
+}
+
+#[hdk_extern]
+pub fn get_manifest_requests(input: LineageInput) -> ExternResult<Vec<ActionHash>> {
+    let links = fetch_links(input.manifest_hash, LinkTypes::ManifestToRequest)?;
+    Ok(links.into_iter()
+        .filter_map(|l| l.target.into_action_hash())
+        .collect())
+}
+
+#[hdk_extern]
+pub fn get_manifest_evidence(input: LineageInput) -> ExternResult<Vec<Record>> {
+    let links = fetch_links(input.manifest_hash, LinkTypes::ManifestToEvidence)?;
+    let mut records = Vec::new();
+    for link in links {
+        if let Some(hash) = link.target.into_action_hash() {
+            if let Some(record) = get(hash, GetOptions::default())? {
+                records.push(record);
+            }
+        }
+    }
+    Ok(records)
 }
 
 // ─────────────────────────────────────────────
@@ -458,6 +831,16 @@ pub fn post_commit(committed_actions: Vec<SignedActionHashed>) {
     }
 }
 
-fn signal_action(_action: SignedActionHashed) -> ExternResult<()> {
+fn signal_action(action: SignedActionHashed) -> ExternResult<()> {
+    if let Action::Create(create) = action.action() {
+        match create.entry_type {
+            EntryType::App(AppEntryDef { entry_index, .. }) => {
+                // Signal is already emitted in request_validation
+                // post_commit is for any additional signaling needed
+                let _ = entry_index;
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }

@@ -1,27 +1,32 @@
 {
-  "name": "poi-dev",
+  "name": "toric-dev",
   "private": true,
   "workspaces": [
     "ui",
     "tests"
   ],
   "scripts": {
-    "start": "AGENTS=${AGENTS:-2} BOOTSTRAP_PORT=$(get-port) npm run network",
-    "network": "hc sandbox clean && npm run build:happ && UI_PORT=$(get-port) concurrently \"npm run start --workspace ui\" \"npm run launch:happ\" \"hc playground\"",
+    "postinstall": "node patches/hc-spin.cjs",
+    "start": "AGENTS=${AGENTS:-3} BOOTSTRAP_PORT=$(get-port) npm run network",
+    "network": "hc sandbox clean && npm run build:happ && UI_PORT=$(get-port) concurrently \"npm run start --workspace ui\" \"node scripts/launch.js\"",
     "test": "npm run build:zomes && hc app pack workdir --recursive && npm run test --workspace tests",
     "launch:happ": "hc-spin -n $AGENTS --ui-port $UI_PORT workdir/poi.happ",
     "package": "npm run build:happ && npm run package --workspace ui && hc web-app pack workdir --recursive",
     "build:happ": "npm run build:zomes && hc app pack workdir --recursive",
-    "build:zomes": "RUSTFLAGS='--cfg getrandom_backend=\"custom\"' cargo build --release --target wasm32-unknown-unknown"
+    "build:zomes": "RUSTFLAGS='--cfg getrandom_backend=\"custom\"' cargo build --release --target wasm32-unknown-unknown --workspace --exclude toric",
+    "tauri:dev": "patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 target/debug/toric 2>/dev/null; target/debug/toric",
+    "tauri:build": "npx @tauri-apps/cli build --debug && patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 target/debug/toric"
   },
   "devDependencies": {
     "@holochain/hc-spin": "^0.600.0",
     "concurrently": "^6.5.1",
+    "get-port": "^7.2.0",
     "get-port-cli": "^3.0.0"
   },
   "engines": {
-    "node": ">=16.0.0"
-  },
+      "node": ">=16.0.0"
+    },
+    "type": "module",
   "hcScaffold": {
     "template": "vanilla"
   }

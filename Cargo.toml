@@ -5,7 +5,10 @@ opt-level = "z"
 opt-level = "z"
 
 [workspace]
-members = ["dnas/*/zomes/coordinator/*", "dnas/*/zomes/integrity/*"]
+members = ["dnas/*/zomes/coordinator/*", "dnas/*/zomes/integrity/*", 
+"dnas/identity/zomes/integrity/identity", 
+"dnas/identity/zomes/coordinator/identity",
+"src-tauri",]
 resolver = "2"
 
 [workspace.dependencies]
@@ -13,6 +16,7 @@ hdi = "=0.7.0"
 hdk = "=0.6.0"
 holochain_serialized_bytes = "*"
 serde = "1.0"
+serde_json = "1"
 
 [workspace.dependencies.registry]
 path = "dnas/registry/zomes/coordinator/registry"

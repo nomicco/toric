@@ -34,7 +34,6 @@ pub enum WarrantBlob {
     MisrepresentedPerformance(MisrepresentedPerformanceWarrant),
     ConnectorMisbehavior(ConnectorMisbehaviorWarrant),
     FalseAttestation(FalseAttestationWarrant),
-    Generic(GenericWarrant),
 }
 
 // ─────────────────────────────────────────────
@@ -134,18 +133,29 @@ pub struct GenericManifest {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ModelEvaluationAttestation {
-    pub validation_method_hash: ActionHash,
-    pub benchmark_type: String,      // e.g. "perplexity", "mmlu", "hellaswag", "custom"
+    pub validation_method_hash: Option<ActionHash>,
+    pub benchmark_type: String,
+
+    // Multi-dimensional score — Phase 5
+    // Each dimension weighted at φ⁻ⁿ in compute_trust_score
+    // Absent dimensions default to None — validator submits what they can verify
+    pub hash_score: f64,                    // φ⁻¹ — did weights match registered hash
+    pub provenance_score: Option<f64>,      // φ⁻² — upstream manifest chain quality
+    pub static_score: Option<f64>,          // φ⁻³ — Garak static scan result
+    pub probe_score: Option<f64>,           // φ⁻⁴ — behavioral probe set result
+
+    // Legacy single-dimension fields — kept for backward compatibility
+    // hash_score replaces score for model evaluations
     pub score: f64,
     pub passed: bool,
     pub confidence: Option<f64>,
-    pub evaluation_details: Option<String>,  // JSON string for benchmark-specific data
+    pub evaluation_details: Option<String>,
     pub evaluated_at: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DatasetAuditAttestation {
-    pub validation_method_hash: ActionHash,
+    pub validation_method_hash: Option<ActionHash>,
     pub audit_type: String,
     pub passed: bool,
     pub findings: Option<String>,
@@ -154,7 +164,7 @@ pub struct DatasetAuditAttestation {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConnectorVerificationAttestation {
-    pub validation_method_hash: ActionHash,
+    pub validation_method_hash: Option<ActionHash>,
     pub connector_manifest_hash: ActionHash,
     pub passed: bool,
     pub verified_schema_compliance: bool,
@@ -165,59 +175,60 @@ pub struct ConnectorVerificationAttestation {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GenericAttestation {
-    pub validation_method_hash: ActionHash,
+    pub validation_method_hash: Option<ActionHash>,
     pub attestation_type: String,
     pub passed: bool,
     pub score: Option<f64>,
     pub details: Option<String>,
     pub evaluated_at: Option<u64>,
 }
-
 // ─────────────────────────────────────────────
 // Warrant blobs
+// Severity is always computed from the divergence
+// measurement — never chosen by the filer.
+// evidence_hash is required — points to the DHT
+// entry containing the proof. Warrants without
+// proof are rejected at the integrity layer.
 // ─────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TamperedWeightsWarrant {
-    pub severity: u8,               // 1-10
-    pub evidence_hashes: Vec<ActionHash>,
+    // Binary — hash either matches or doesn't.
+    // computed_severity always 1_000_000 (max, scaled).
+    pub evidence_hash: ActionHash,   // validator's hash computation record
     pub expected_hash: String,
     pub found_hash: String,
+    pub computed_severity: u32,      // always 1_000_000 — set by validator client
     pub description: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MisrepresentedPerformanceWarrant {
-    pub severity: u8,
-    pub evidence_hashes: Vec<ActionHash>,
+    // computed_severity = |claimed - actual| / claimed × 1_000_000
+    pub evidence_hash: ActionHash,   // benchmark output record
     pub claimed_score: f64,
     pub actual_score: f64,
     pub benchmark_type: String,
+    pub computed_severity: u32,      // derived from delta, set by validator client
     pub description: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConnectorMisbehaviorWarrant {
-    pub severity: u8,
-    pub evidence_hashes: Vec<ActionHash>,
+    // computed_severity = schema_deviation_fraction × 1_000_000
+    pub evidence_hash: ActionHash,   // connector signed output record
     pub connector_manifest_hash: ActionHash,
     pub misbehavior_type: String,
+    pub computed_severity: u32,
     pub description: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FalseAttestationWarrant {
-    pub severity: u8,
-    pub evidence_hashes: Vec<ActionHash>,
+    // computed_severity = reputation_weight of false attestor × 1_000_000
+    pub evidence_hash: ActionHash,   // the disputed attestation hash
     pub disputed_attestation_hash: ActionHash,
-    pub description: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct GenericWarrant {
-    pub severity: u8,
-    pub warrant_type: String,
-    pub evidence_hashes: Vec<ActionHash>,
+    pub computed_severity: u32,
     pub description: Option<String>,
 }
 
@@ -265,4 +276,22 @@ pub fn decode_warrant_blob(bytes: &SerializedBytes) -> ExternResult<WarrantBlob>
     serde_json::from_slice(&raw).map_err(|e| {
         wasm_error!(WasmErrorInner::Guest(format!("Failed to deserialize warrant blob: {}", e)))
     })
+}
+
+pub fn warrant_computed_severity(blob: &WarrantBlob) -> u32 {
+    match blob {
+        WarrantBlob::TamperedWeights(w)           => w.computed_severity,
+        WarrantBlob::MisrepresentedPerformance(w) => w.computed_severity,
+        WarrantBlob::ConnectorMisbehavior(w)      => w.computed_severity,
+        WarrantBlob::FalseAttestation(w)          => w.computed_severity,
+    }
+}
+
+pub fn warrant_evidence_hash(blob: &WarrantBlob) -> &ActionHash {
+    match blob {
+        WarrantBlob::TamperedWeights(w)           => &w.evidence_hash,
+        WarrantBlob::MisrepresentedPerformance(w) => &w.evidence_hash,
+        WarrantBlob::ConnectorMisbehavior(w)      => &w.evidence_hash,
+        WarrantBlob::FalseAttestation(w)          => &w.evidence_hash,
+    }
 }

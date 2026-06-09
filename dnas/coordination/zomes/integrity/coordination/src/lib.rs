@@ -5,6 +5,8 @@ use hdi::prelude::*;
 pub struct ValidationRequest {
     pub manifest_hash: ActionHash,
     pub requester: AgentPubKey,
+    pub validation_type: String,
+    pub required_capabilities: Vec<String>,
     pub metadata_blob: SerializedBytes,
 }
 
@@ -14,6 +16,25 @@ pub struct EvaluationBundle {
     pub request_hash: ActionHash,
     pub evaluator: AgentPubKey,
     pub metadata_blob: SerializedBytes,
+}
+
+#[hdk_entry_helper]
+#[derive(Clone)]
+pub struct EvaluationCommitment {
+    pub request_hash: ActionHash,
+    pub evaluator: AgentPubKey,
+    pub commitment_hash: Vec<u8>,  
+}
+
+#[hdk_entry_helper]
+#[derive(Clone)]
+pub struct ValidationEvidence {
+    pub manifest_hash: ActionHash,
+    pub evidence_type: String,   
+    pub expected: String,         
+    pub actual: String,           
+    pub computed_severity: u32,   
+    pub metadata_blob: SerializedBytes, 
 }
 
 #[hdk_entry_helper]
@@ -31,15 +52,20 @@ pub struct QuorumBundle {
 #[unit_enum(UnitEntryTypes)]
 pub enum EntryTypes {
     ValidationRequest(ValidationRequest),
+    EvaluationCommitment(EvaluationCommitment),
     EvaluationBundle(EvaluationBundle),
     QuorumBundle(QuorumBundle),
+    ValidationEvidence(ValidationEvidence),
 }
 
 #[hdk_link_types]
 pub enum LinkTypes {
     RequestToEvaluation,
+    RequestToCommitment,
     RequestToQuorum,
     AgentToRequest,
+    ManifestToRequest,
+    ManifestToEvidence,
 }
 
 #[hdk_extern]
@@ -63,6 +89,19 @@ fn validate_create_validation_request(
     Ok(ValidateCallbackResult::Valid)
 }
 
+fn validate_create_evaluation_commitment(
+    _action: Create,
+    commitment: EvaluationCommitment,
+) -> ExternResult<ValidateCallbackResult> {
+    must_get_valid_record(commitment.request_hash)?;
+    if commitment.commitment_hash.len() != 32 {
+        return Ok(ValidateCallbackResult::Invalid(
+            "Commitment hash must be 32 bytes (sha256)".to_string()
+        ));
+    }
+    Ok(ValidateCallbackResult::Valid)
+}
+
 fn validate_create_evaluation_bundle(
     _action: Create,
     bundle: EvaluationBundle,
@@ -79,6 +118,15 @@ fn validate_create_quorum_bundle(
     Ok(ValidateCallbackResult::Valid)
 }
 
+fn validate_create_link_request_to_commitment(
+    _action: CreateLink,
+    _base_address: AnyLinkableHash,
+    _target_address: AnyLinkableHash,
+    _tag: LinkTag,
+) -> ExternResult<ValidateCallbackResult> {
+    Ok(ValidateCallbackResult::Valid)
+}
+
 fn validate_create_link_request_to_evaluation(
     _action: CreateLink,
     _base_address: AnyLinkableHash,
@@ -89,6 +137,34 @@ fn validate_create_link_request_to_evaluation(
 }
 
 fn validate_create_link_request_to_quorum(
+    _action: CreateLink,
+    _base_address: AnyLinkableHash,
+    _target_address: AnyLinkableHash,
+    _tag: LinkTag,
+) -> ExternResult<ValidateCallbackResult> {
+    Ok(ValidateCallbackResult::Valid)
+}
+
+fn validate_create_validation_evidence(
+    _action: Create,
+    evidence: ValidationEvidence,
+) -> ExternResult<ValidateCallbackResult> {
+    // manifest_hash lives in registry DNA — can't must_get_valid_record cross-DNA
+    // structural validation only here
+    if evidence.evidence_type.is_empty() {
+        return Ok(ValidateCallbackResult::Invalid(
+            "ValidationEvidence requires a non-empty evidence_type".to_string()
+        ));
+    }
+    if evidence.computed_severity > 1_000_000 {
+        return Ok(ValidateCallbackResult::Invalid(
+            "computed_severity must be 0-1_000_000".to_string()
+        ));
+    }
+    Ok(ValidateCallbackResult::Valid)
+}
+
+fn validate_create_link_manifest_to_evidence(
     _action: CreateLink,
     _base_address: AnyLinkableHash,
     _target_address: AnyLinkableHash,
@@ -114,10 +190,14 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
             match app_entry {
                 EntryTypes::ValidationRequest(request) =>
                     validate_create_validation_request(action, request),
+                EntryTypes::EvaluationCommitment(commitment) =>
+                    validate_create_evaluation_commitment(action, commitment),
                 EntryTypes::EvaluationBundle(bundle) =>
                     validate_create_evaluation_bundle(action, bundle),
                 EntryTypes::QuorumBundle(bundle) =>
                     validate_create_quorum_bundle(action, bundle),
+                EntryTypes::ValidationEvidence(evidence) =>
+                    validate_create_validation_evidence(action, evidence),
             }
         }
 
@@ -145,10 +225,16 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
         } => match link_type {
             LinkTypes::RequestToEvaluation =>
                 validate_create_link_request_to_evaluation(action, base_address, target_address, tag),
+            LinkTypes::RequestToCommitment =>
+                validate_create_link_request_to_commitment(action, base_address, target_address, tag),
             LinkTypes::RequestToQuorum =>
                 validate_create_link_request_to_quorum(action, base_address, target_address, tag),
             LinkTypes::AgentToRequest =>
                 validate_create_link_agent_to_request(action, base_address, target_address, tag),
+            LinkTypes::ManifestToRequest =>
+                Ok(ValidateCallbackResult::Valid),
+            LinkTypes::ManifestToEvidence =>
+                validate_create_link_manifest_to_evidence(action, base_address, target_address, tag),
         },
 
         FlatOp::RegisterDeleteLink { .. } =>
@@ -160,10 +246,14 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
             match app_entry {
                 EntryTypes::ValidationRequest(request) =>
                     validate_create_validation_request(action, request),
+                EntryTypes::EvaluationCommitment(commitment) =>
+                    validate_create_evaluation_commitment(action, commitment),
                 EntryTypes::EvaluationBundle(bundle) =>
                     validate_create_evaluation_bundle(action, bundle),
                 EntryTypes::QuorumBundle(bundle) =>
                     validate_create_quorum_bundle(action, bundle),
+                EntryTypes::ValidationEvidence(evidence) =>
+                    validate_create_validation_evidence(action, evidence),
             }
         }
 
@@ -186,10 +276,16 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
         }) => match link_type {
             LinkTypes::RequestToEvaluation =>
                 validate_create_link_request_to_evaluation(action, base_address, target_address, tag),
+            LinkTypes::RequestToCommitment =>
+                validate_create_link_request_to_commitment(action, base_address, target_address, tag),
             LinkTypes::RequestToQuorum =>
                 validate_create_link_request_to_quorum(action, base_address, target_address, tag),
             LinkTypes::AgentToRequest =>
                 validate_create_link_agent_to_request(action, base_address, target_address, tag),
+            LinkTypes::ManifestToRequest =>
+                Ok(ValidateCallbackResult::Valid),
+            LinkTypes::ManifestToEvidence =>
+                validate_create_link_manifest_to_evidence(action, base_address, target_address, tag),
         },
 
         FlatOp::StoreRecord(OpRecord::DeleteLink { .. }) =>

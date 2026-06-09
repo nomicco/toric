@@ -1,0 +1,5 @@
+node_modules
+target
+.git
+tests/node_modules
+ui/node_modules

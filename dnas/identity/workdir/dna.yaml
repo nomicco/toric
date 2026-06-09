@@ -1,0 +1,14 @@
+manifest_version: "0"
+name: identity
+integrity:
+  network_seed: ~
+  properties: ~
+  zomes:
+    - name: identity_integrity
+      path: "../../../target/wasm32-unknown-unknown/release/identity_integrity.wasm"
+coordinator:
+  zomes:
+    - name: identity
+      path: "../../../target/wasm32-unknown-unknown/release/identity.wasm"
+      dependencies:
+        - name: identity_integrity

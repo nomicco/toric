@@ -1,5 +1,5 @@
 manifest_version: '0'
-name: poi
+name: toric
 description: null
 roles:
 - name: registry
@@ -9,7 +9,7 @@ roles:
   dna:
     path: ../dnas/registry/workdir/registry.dna
     modifiers:
-      network_seed: null
+      network_seed: "toric-v1"
       properties: null
     installed_hash: null
     clone_limit: 0
@@ -20,7 +20,7 @@ roles:
   dna:
     path: ../dnas/coordination/workdir/coordination.dna
     modifiers:
-      network_seed: null
+      network_seed: "toric-v1"
       properties: null
     installed_hash: null
     clone_limit: 0
@@ -31,7 +31,18 @@ roles:
   dna:
     path: ../dnas/mutual_credit/workdir/mutual_credit.dna
     modifiers:
-      network_seed: null
+      network_seed: "toric-v1"
+      properties: null
+    installed_hash: null
+    clone_limit: 0
+- name: identity
+  provisioning:
+    strategy: create
+    deferred: false
+  dna:
+    path: ../dnas/identity/workdir/identity.dna
+    modifiers:
+      network_seed: "toric-v1"
       properties: null
     installed_hash: null
     clone_limit: 0

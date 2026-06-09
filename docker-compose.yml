@@ -1,0 +1,69 @@
+version: '3.8'
+
+# Toric — 3-node network
+#
+# Bootstrap server runs on Pi at 192.168.1.45:8888
+# To start: sudo docker compose up -d
+#
+# UI access:
+#   Agent 0: http://localhost:DEV_PORT/?api=3000
+#   Agent 1: http://localhost:DEV_PORT/?api=3001
+#   Agent 2: http://localhost:DEV_PORT/?api=3002
+
+services:
+
+  agent0:
+    build: .
+    restart: unless-stopped
+    environment:
+      BOOTSTRAP_URL: http://192.168.1.45:8888
+      SIGNAL_URL: wss://dev-test-bootstrap2.holochain.org
+      RELAY_URL: wss://dev-test-bootstrap2.holochain.org
+      APP_ID: toric
+      ADMIN_PORT: "44121"
+      APP_PORT: "44122"
+      API_PORT: "3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - agent0-data:/data
+      - /nix/store:/nix/store:ro
+
+  agent1:
+    build: .
+    restart: unless-stopped
+    environment:
+      BOOTSTRAP_URL: http://192.168.1.45:8888
+      SIGNAL_URL: wss://dev-test-bootstrap2.holochain.org
+      RELAY_URL: wss://dev-test-bootstrap2.holochain.org
+      APP_ID: toric
+      ADMIN_PORT: "44121"
+      APP_PORT: "44122"
+      API_PORT: "3001"
+    ports:
+      - "3001:3001"
+    volumes:
+      - agent1-data:/data
+      - /nix/store:/nix/store:ro
+
+  agent2:
+    build: .
+    restart: unless-stopped
+    environment:
+      BOOTSTRAP_URL: http://192.168.1.45:8888
+      SIGNAL_URL: wss://dev-test-bootstrap2.holochain.org
+      RELAY_URL: wss://dev-test-bootstrap2.holochain.org
+      APP_ID: toric
+      ADMIN_PORT: "44121"
+      APP_PORT: "44122"
+      API_PORT: "3002"
+    ports:
+      - "3002:3002"
+    volumes:
+      - agent2-data:/data
+      - /nix/store:/nix/store:ro
+
+volumes:
+  agent0-data:
+  agent1-data:
+  agent2-data:

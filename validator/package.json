@@ -1,0 +1,13 @@
+{
+  "name": "toric-validator",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dry-run": "DRY_RUN=true node index.js"
+  },
+  "dependencies": {
+    "eventsource": "^4.1.0",
+    "node-fetch": "^3.3.2"
+  }
+}

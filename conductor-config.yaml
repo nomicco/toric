@@ -1,0 +1,19 @@
+---
+data_root_path: /data
+keystore:
+  type: lair_server_in_proc
+admin_interfaces:
+  - driver:
+      type: websocket
+      port: 44121
+      allowed_origins: "*"
+network:
+  type: NetworkConfig
+  bootstrap_url: "${BOOTSTRAP_URL:-https://bootstrap.holo.host}"
+  signal_url: "${SIGNAL_URL:-wss://signal.holo.host}"
+  relay_url: "${RELAY_URL:-wss://signal.holo.host}"
+  webrtc_config:
+    iceServers:
+      - urls:
+          - stun:stun.l.google.com:19302
+db_sync_strategy: Fast

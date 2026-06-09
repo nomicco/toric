@@ -1,0 +1,1333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TORIC</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400&display=swap" rel="stylesheet">
+<style>
+/* ─── Reset & Base ─────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #060608;
+  --bg2:       #0c0c10;
+  --bg3:       #12121a;
+  --border:    rgba(255,255,255,0.06);
+  --border2:   rgba(255,255,255,0.12);
+  --text:      #c8c8d4;
+  --text2:     #7070a0;
+  --text3:     #404060;
+  --accent:    #39e8a0;
+  --accent2:   rgba(57,232,160,0.08);
+  --accent3:   rgba(57,232,160,0.18);
+  --warn:      #e85757;
+  --warn2:     rgba(232,87,87,0.08);
+  --amber:     #e8b039;
+  --amber2:    rgba(232,176,57,0.08);
+  --mono:      'IBM Plex Mono', monospace;
+  --sans:      'IBM Plex Sans', sans-serif;
+  --scan:      repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+}
+
+html { background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 1.6; height: 100%; }
+body { height: 100%; overflow: hidden; }
+
+/* Scan-line texture */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: var(--scan);
+  pointer-events: none;
+  z-index: 1000;
+  opacity: 0.4;
+}
+
+/* ─── Layout ────────────────────────────────────── */
+.shell {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  grid-template-rows: 32px 1fr 24px;
+  height: 100vh;
+  gap: 0;
+}
+
+/* ─── Topbar ────────────────────────────────────── */
+.topbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text3);
+  letter-spacing: 0.08em;
+}
+.topbar-left { display: flex; align-items: center; gap: 16px; }
+.topbar-logo { color: var(--accent); font-weight: 600; letter-spacing: 0.15em; font-size: 12px; }
+.topbar-sep { color: var(--border2); }
+.topbar-right { display: flex; align-items: center; gap: 16px; }
+.status-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent);
+  display: inline-block; margin-right: 5px;
+  animation: pulse 2.4s ease-in-out infinite;
+}
+.status-dot.offline { background: var(--warn); animation: none; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+/* ─── Sidebar ───────────────────────────────────── */
+.sidebar {
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.nav { padding: 16px 0; flex: 1; }
+.nav-section { font-size: 9px; color: var(--text3); letter-spacing: 0.15em; padding: 12px 16px 4px; text-transform: uppercase; }
+.nav-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 16px;
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  border-left: 2px solid transparent;
+  transition: all 0.1s;
+  user-select: none;
+}
+.nav-item:hover { color: var(--text); background: var(--bg3); }
+.nav-item.active { color: var(--accent); border-left-color: var(--accent); background: var(--accent2); }
+.nav-item .icon { width: 14px; opacity: 0.6; font-style: normal; font-size: 11px; }
+.nav-item.active .icon { opacity: 1; }
+
+.sidebar-foot {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text3);
+}
+.sidebar-foot .agent-key {
+  color: var(--text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  margin-top: 3px;
+  cursor: pointer;
+}
+.sidebar-foot .agent-key:hover { color: var(--accent); }
+
+/* ─── Main ──────────────────────────────────────── */
+.main {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+/* ─── Panel ─────────────────────────────────────── */
+.panel {
+  display: none;
+  flex: 1;
+  overflow: hidden;
+  flex-direction: column;
+  animation: fadein 0.12s ease;
+}
+.panel.active { display: flex; }
+@keyframes fadein { from{opacity:0;transform:translateY(2px)} to{opacity:1;transform:none} }
+
+.panel-header {
+  padding: 18px 24px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.panel-title {
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text2);
+  margin-bottom: 2px;
+}
+.panel-sub { font-size: 11px; color: var(--text3); }
+
+.panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+.panel-body::-webkit-scrollbar { width: 3px; }
+.panel-body::-webkit-scrollbar-thumb { background: var(--bg3); }
+
+/* ─── Statusbar ─────────────────────────────────── */
+.statusbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text3);
+  letter-spacing: 0.06em;
+}
+.statusbar-left { display: flex; gap: 20px; }
+.statusbar-right { display: flex; gap: 20px; }
+.sb-item { display: flex; gap: 5px; }
+.sb-label { color: var(--text3); }
+.sb-value { color: var(--text2); }
+.sb-value.accent { color: var(--accent); }
+.sb-value.warn { color: var(--warn); }
+
+/* ─── Monitor Panel ─────────────────────────────── */
+.event-stream {
+  padding: 8px 0;
+  font-size: 12px;
+}
+.event-row {
+  display: grid;
+  grid-template-columns: 90px 140px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 5px 24px;
+  border-bottom: 1px solid var(--border);
+  animation: slidein 0.15s ease;
+  transition: background 0.1s;
+}
+.event-row:hover { background: var(--bg2); }
+@keyframes slidein { from{opacity:0;transform:translateX(-4px)} to{opacity:1;transform:none} }
+.ev-time { color: var(--text3); font-size: 11px; }
+.ev-type { font-size: 11px; letter-spacing: 0.06em; }
+.ev-type.validation { color: var(--amber); }
+.ev-type.quorum     { color: var(--accent); }
+.ev-type.attestation{ color: var(--accent); }
+.ev-type.warrant    { color: var(--warn); }
+.ev-type.manifest   { color: var(--text2); }
+.ev-hash { color: var(--text3); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.stream-empty {
+  padding: 40px 24px;
+  color: var(--text3);
+  font-size: 12px;
+}
+.stream-empty::before { content: '> '; color: var(--accent); }
+
+/* ─── Query Panel ───────────────────────────────── */
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.search-prompt { color: var(--accent); margin-right: 8px; font-size: 13px; }
+.search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  caret-color: var(--accent);
+}
+.search-input::placeholder { color: var(--text3); }
+
+.query-result { padding: 20px 24px; }
+
+.result-block {
+  margin-bottom: 24px;
+  border: 1px solid var(--border);
+  background: var(--bg2);
+}
+.rb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.rb-title { font-size: 11px; letter-spacing: 0.1em; color: var(--text2); text-transform: uppercase; }
+.rb-value { font-size: 20px; font-weight: 300; color: var(--accent); }
+.rb-value.warn { color: var(--warn); }
+.rb-value.neutral { color: var(--text); }
+
+.kv-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.kv-item {
+  padding: 10px 16px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.kv-item:nth-child(even) { border-right: none; }
+.kv-key { font-size: 9px; color: var(--text3); letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 3px; }
+.kv-val { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kv-val.accent { color: var(--accent); }
+.kv-val.warn   { color: var(--warn); }
+.kv-val.amber  { color: var(--amber); }
+
+.score-bar {
+  height: 2px;
+  background: var(--bg3);
+  margin: 12px 16px;
+  position: relative;
+}
+.score-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+.score-fill.warn { background: var(--warn); }
+.score-threshold {
+  position: absolute;
+  top: -4px;
+  width: 1px;
+  height: 10px;
+  background: var(--text3);
+  left: 61.8%; /* φ⁻¹ */
+}
+.score-threshold::after {
+  content: 'φ⁻¹';
+  position: absolute;
+  top: -14px;
+  left: -8px;
+  font-size: 9px;
+  color: var(--text3);
+  white-space: nowrap;
+}
+
+.attestation-list { padding: 0; }
+.att-row {
+  display: grid;
+  grid-template-columns: 8px 1fr 70px 60px;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.att-row:last-child { border-bottom: none; }
+.att-dot { width: 5px; height: 5px; border-radius: 50%; }
+.att-dot.pass { background: var(--accent); }
+.att-dot.fail { background: var(--warn); }
+.att-agent { color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-score { color: var(--text3); text-align: right; }
+.att-verdict { text-align: right; }
+.att-verdict.pass { color: var(--accent); }
+.att-verdict.fail { color: var(--warn); }
+
+.lineage-section { padding: 12px 16px; }
+.lineage-label { font-size: 9px; color: var(--text3); letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 8px; }
+.lineage-hash {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--text2);
+  padding: 3px 8px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  margin: 2px;
+  cursor: pointer;
+  transition: all 0.1s;
+}
+.lineage-hash:hover { color: var(--accent); border-color: var(--accent3); }
+
+.warrant-banner {
+  padding: 10px 16px;
+  background: var(--warn2);
+  border-bottom: 1px solid rgba(232,87,87,0.2);
+  font-size: 11px;
+  color: var(--warn);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* ─── Status Panel ──────────────────────────────── */
+.status-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+.stat-card {
+  padding: 20px 24px;
+  border-right: 1px solid var(--border);
+}
+.stat-card:last-child { border-right: none; }
+.stat-label { font-size: 9px; color: var(--text3); letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 8px; }
+.stat-value { font-size: 28px; font-weight: 300; color: var(--text); line-height: 1; }
+.stat-value.accent { color: var(--accent); }
+.stat-value.warn   { color: var(--warn); }
+.stat-sub { font-size: 10px; color: var(--text3); margin-top: 4px; }
+.stat-sub.up   { color: var(--accent); }
+.stat-sub.down { color: var(--warn); }
+
+.section-head {
+  padding: 16px 24px 8px;
+  font-size: 9px;
+  color: var(--text3);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+}
+
+.manifest-row {
+  display: grid;
+  grid-template-columns: 1fr 80px 80px;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.manifest-row:hover { background: var(--bg2); }
+.mr-hash { color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mr-arch { color: var(--text3); }
+.mr-score { text-align: right; }
+.mr-score.pass { color: var(--accent); }
+.mr-score.fail { color: var(--warn); }
+
+.phase-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  padding: 3px 8px;
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  margin-top: 8px;
+}
+.phase-badge.genesis  { border-color: var(--amber); color: var(--amber); }
+.phase-badge.governed { border-color: var(--accent); color: var(--accent); }
+
+.fib-progress {
+  margin: 16px 24px;
+}
+.fib-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text3);
+  margin-bottom: 6px;
+}
+.fib-bar { height: 2px; background: var(--bg3); }
+.fib-fill { height: 100%; background: var(--accent); transition: width 0.6s ease; }
+
+/* ─── Network Panel ─────────────────────────────── */
+.phi-table { padding: 0; }
+.phi-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.phi-name { color: var(--text2); }
+.phi-val  { color: var(--accent); text-align: right; }
+
+/* ─── Empty / Loading states ────────────────────── */
+.empty {
+  padding: 32px 24px;
+  color: var(--text3);
+  font-size: 12px;
+}
+.empty::before { content: '> '; color: var(--text3); }
+
+.loading {
+  display: inline-block;
+  color: var(--text3);
+  font-size: 12px;
+}
+.loading::after {
+  content: '...';
+  animation: dots 1.2s steps(4, end) infinite;
+}
+@keyframes dots {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%  { content: '...'; }
+}
+
+/* ─── Utilities ─────────────────────────────────── */
+.hash {
+  font-size: 11px;
+  color: var(--text3);
+  cursor: pointer;
+  transition: color 0.1s;
+}
+.hash:hover { color: var(--accent); }
+
+.tag {
+  display: inline-block;
+  font-size: 9px;
+  padding: 2px 6px;
+  border: 1px solid var(--border2);
+  color: var(--text3);
+  letter-spacing: 0.06em;
+  margin: 1px;
+}
+.tag.pass { border-color: rgba(57,232,160,0.3); color: var(--accent); }
+.tag.fail { border-color: rgba(232,87,87,0.3);  color: var(--warn); }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Topbar -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="topbar-logo">TORIC</span>
+      <span class="topbar-sep">/</span>
+      <span id="tb-net">proof of integrity network</span>
+    </div>
+    <div class="topbar-right">
+      <span><span class="status-dot" id="conn-dot"></span><span id="conn-status">connecting</span></span>
+      <span id="tb-time"></span>
+    </div>
+  </header>
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <nav class="nav" id="nav">
+      <div class="nav-section">observe</div>
+      <div class="nav-item active" data-panel="monitor">
+        <i class="icon">⬡</i> Monitor
+      </div>
+      <div class="nav-section">query</div>
+      <div class="nav-item" data-panel="query">
+        <i class="icon">◈</i> Query
+      </div>
+      <div class="nav-section">node</div>
+      <div class="nav-item" data-panel="status">
+        <i class="icon">◉</i> Status
+      </div>
+      <div class="nav-item" data-panel="network">
+        <i class="icon">⬡</i> Network
+      </div>
+      <div class="nav-section">discover</div>
+      <div class="nav-item" data-panel="browse">
+        <i class="icon">◎</i> Browse
+      </div>
+    </nav>
+    <div class="sidebar-foot">
+      <div style="color:var(--text3);font-size:9px;letter-spacing:0.1em;text-transform:uppercase">agent</div>
+      <div class="agent-key" id="agent-key" title="click to copy">—</div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+
+    <!-- Monitor Panel -->
+    <div class="panel active" id="panel-monitor">
+      <div class="panel-header">
+        <div class="panel-title">monitor</div>
+        <div class="panel-sub">live network event stream</div>
+      </div>
+      <div class="panel-body">
+        <div class="event-stream" id="event-stream">
+          <div class="stream-empty">awaiting events</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Query Panel -->
+    <div class="panel" id="panel-query">
+      <div class="panel-header">
+        <div class="panel-title">query</div>
+        <div class="panel-sub">manifest hash · content hash · agent pubkey</div>
+      </div>
+      <div class="search-bar">
+        <span class="search-prompt">&gt;</span>
+        <input class="search-input" id="search-input" type="text"
+          placeholder="hCkk... or sha256:... or uhCAk..."
+          autocomplete="off" spellcheck="false">
+      </div>
+      <div class="panel-body">
+        <div class="query-result" id="query-result">
+          <div class="empty">enter a hash to query</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status Panel -->
+    <div class="panel" id="panel-status">
+      <div class="panel-header">
+        <div class="panel-title">status</div>
+        <div class="panel-sub">this node</div>
+      </div>
+      <div class="panel-body" id="status-body">
+        <div class="empty loading">loading</div>
+      </div>
+    </div>
+
+    <!-- Network Panel -->
+    <div class="panel" id="panel-network">
+      <div class="panel-header">
+        <div class="panel-title">network</div>
+        <div class="panel-sub">φ-derived parameters — none chosen, all forced</div>
+      </div>
+      <div class="panel-body" id="network-body">
+        <div class="empty loading">loading</div>
+      </div>
+    </div>
+
+    <!-- Browse Panel -->
+    <div class="panel" id="panel-browse">
+      <div class="panel-header">
+        <div class="panel-title">browse</div>
+        <div class="panel-sub">all registered models — ranked by trust score</div>
+      </div>
+      <div class="panel-body" id="browse-body">
+        <div class="empty loading">loading</div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Statusbar -->
+  <footer class="statusbar">
+    <div class="statusbar-left">
+      <div class="sb-item">
+        <span class="sb-label">attestations</span>
+        <span class="sb-value accent" id="sb-att">—</span>
+      </div>
+      <div class="sb-item">
+        <span class="sb-label">threshold</span>
+        <span class="sb-value" id="sb-threshold">—</span>
+      </div>
+      <div class="sb-item">
+        <span class="sb-label">supply</span>
+        <span class="sb-value" id="sb-supply">—</span>
+      </div>
+      <div class="sb-item">
+        <span class="sb-label">phase</span>
+        <span class="sb-value" id="sb-phase">—</span>
+      </div>
+    </div>
+    <div class="statusbar-right">
+      <div class="sb-item">
+        <span class="sb-label">events</span>
+        <span class="sb-value" id="sb-events">0</span>
+      </div>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+// ─────────────────────────────────────────────────
+// Configuration
+// Panels register themselves — adding a new panel
+// requires only: add nav-item, add panel div, add
+// to PANELS registry, implement render function.
+// ─────────────────────────────────────────────────
+
+const params = new URLSearchParams(window.location.search);
+const apiPort = params.get('api') || '3000';
+const API = `http://localhost:${apiPort}/v1`;
+const SIGNALS_URL = `http://localhost:${apiPort}/signals`;
+
+// ─────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────
+
+const State = {
+  agent: null,
+  connected: false,
+  networkState: null,
+  reputation: null,
+  myManifests: [],
+  eventCount: 0,
+};
+
+// ─────────────────────────────────────────────────
+// API
+// ─────────────────────────────────────────────────
+
+const Api = {
+  async get(path) {
+    const res = await fetch(`${API}${path}`);
+    if (!res.ok) throw new Error(`${res.status} ${path}`);
+    return res.json();
+  },
+  async post(path, body) {
+    const res = await fetch(`${API}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`${res.status} ${path}`);
+    return res.json();
+  },
+};
+
+// ─────────────────────────────────────────────────
+// Router
+// ─────────────────────────────────────────────────
+
+const Router = {
+  current: 'monitor',
+  navigate(panelId) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const panel = document.getElementById(`panel-${panelId}`);
+    const navItem = document.querySelector(`[data-panel="${panelId}"]`);
+    if (panel) panel.classList.add('active');
+    if (navItem) navItem.classList.add('active');
+    this.current = panelId;
+    Panels[panelId]?.onActivate?.();
+  },
+};
+
+document.getElementById('nav').addEventListener('click', e => {
+  const item = e.target.closest('.nav-item');
+  if (item?.dataset.panel) Router.navigate(item.dataset.panel);
+});
+
+// ─────────────────────────────────────────────────
+// Utilities
+// ─────────────────────────────────────────────────
+
+const fmt = {
+  hash: h => h ? `${h.slice(0,8)}…${h.slice(-6)}` : '—',
+  score: s => typeof s === 'number' ? s.toFixed(4) : '—',
+  delta: d => {
+    if (typeof d !== 'number') return '';
+    return d >= 0 ? `↑${d.toFixed(3)}` : `↓${Math.abs(d).toFixed(3)}`;
+  },
+  time: () => new Date().toISOString().slice(11, 19),
+  arch: a => a || '—',
+  params: n => {
+    if (!n) return '—';
+    if (n >= 1e12) return (n/1e12).toFixed(1)+'T';
+    if (n >= 1e9)  return (n/1e9).toFixed(1)+'B';
+    if (n >= 1e6)  return (n/1e6).toFixed(1)+'M';
+    return n.toString();
+  },
+};
+
+function copyText(text) {
+  navigator.clipboard?.writeText(text).then(() => {
+    const el = document.querySelector('.agent-key');
+    if (el) {
+      const orig = el.textContent;
+      el.textContent = 'copied';
+      el.style.color = 'var(--accent)';
+      setTimeout(() => {
+        el.textContent = orig;
+        el.style.color = '';
+      }, 300);
+    }
+  });
+}
+
+function passes(score) { return typeof score === 'number' && score >= 0.618; }
+
+// ─────────────────────────────────────────────────
+// Panels registry
+// To add a new panel: implement { onActivate, render }
+// ─────────────────────────────────────────────────
+
+const Panels = {};
+
+// ─── Monitor Panel ───────────────────────────────
+
+let maxEvents = 200;
+
+Panels.monitor = {
+  onActivate() {},
+  addEvent(type, hash, raw) {
+    State.eventCount++;
+    document.getElementById('sb-events').textContent = State.eventCount;
+
+    const stream = document.getElementById('event-stream');
+    const empty = stream.querySelector('.stream-empty');
+    if (empty) empty.remove();
+
+    const typeClass = {
+      'ValidationRequested': 'validation',
+      'QuorumReached':        'quorum',
+      'AttestationCreated':   'attestation',
+      'WarrantCreated':        'warrant',
+      'ManifestCreated':       'manifest',
+    }[type] || 'manifest';
+
+    const typeLabel = {
+      'ValidationRequested': 'VALIDATION.REQ',
+      'QuorumReached':        'QUORUM.REACHED',
+      'AttestationCreated':   'ATTESTATION',
+      'WarrantCreated':        'WARRANT',
+      'ManifestCreated':       'MANIFEST',
+    }[type] || type;
+
+    const row = document.createElement('div');
+    row.className = 'event-row';
+    row.innerHTML = `
+      <span class="ev-time">${fmt.time()}</span>
+      <span class="ev-type ${typeClass}">${typeLabel}</span>
+      <span class="ev-hash">${hash || '—'}</span>
+    `;
+
+    stream.prepend(row);
+
+    // Prune old events
+    const rows = stream.querySelectorAll('.event-row');
+    if (rows.length > maxEvents) rows[rows.length - 1].remove();
+  },
+};
+
+// ─── Query Panel ─────────────────────────────────
+
+Panels.query = {
+  onActivate() {
+    document.getElementById('search-input').focus();
+  },
+  async search(val) {
+    const container = document.getElementById('query-result');
+    container.innerHTML = '<div class="empty loading">querying</div>';
+
+    try {
+      if (val.startsWith('hCkk') || val.startsWith('hC')) {
+        await this.renderManifest(container, val);
+      } else if (val.startsWith('uhCAk') || val.startsWith('uhC')) {
+        await this.renderAgent(container, val);
+      } else if (val.startsWith('sha256:') || val.match(/^[a-f0-9]{64}$/)) {
+        await this.renderConvergence(container, val);
+      } else {
+        container.innerHTML = '<div class="empty">unrecognized format — enter manifest hash (hCkk...), agent pubkey (uhCAk...), or content hash (sha256:...)</div>';
+      }
+    } catch(e) {
+      container.innerHTML = `<div class="empty">error: ${e.message}</div>`;
+    }
+  },
+
+  async renderManifest(container, hash) {
+    const entry_preview = await Api.get(`/manifest/${hash}`).catch(() => null);
+    const contentHash = entry_preview?.entry?.content_hash;
+
+    const [manifest, attestations, warrants, trustScore, upstreams, derivatives, convergenceHashes] = await Promise.all([
+      Api.get(`/manifest/${hash}`),
+      Api.get(`/manifest/${hash}/attestations`).catch(() => []),
+      Api.get(`/manifest/${hash}/warrants`).catch(() => []),
+      Api.get(`/manifest/${hash}/trust-score`).catch(() => null),
+      Api.get(`/manifest/${hash}/upstreams`).catch(() => []),
+      Api.get(`/manifest/${hash}/derivatives`).catch(() => []),
+      contentHash ? Api.get(`/content/${encodeURIComponent(contentHash)}/manifests`).catch(() => []) : Promise.resolve([]),
+    ]);
+
+    const entry = manifest.entry || {};
+    const score = trustScore?.score ?? 0;
+    const pct = (score * 100).toFixed(1);
+    const scoreClass = passes(score) ? 'accent' : 'warn';
+    const warrantHtml = warrants.length > 0
+      ? `<div class="warrant-banner">⚠ ${warrants.length} active warrant${warrants.length > 1 ? 's' : ''}</div>`
+      : '';
+
+    const attRows = (attestations || []).map(a => {
+      const p = a.entry?.passed !== false;
+      const sc = a.entry?.score != null ? Number(a.entry.score).toFixed(3) : '—';
+      return `<div class="att-row">
+        <div class="att-dot ${p ? 'pass' : 'fail'}"></div>
+        <div class="att-agent hash" onclick="copyText('${a.author}')" title="${a.author}">${fmt.hash(a.author)}</div>
+        <div class="att-score">${sc}</div>
+        <div class="att-verdict ${p ? 'pass' : 'fail'}">${p ? 'pass' : 'fail'}</div>
+      </div>`;
+    }).join('');
+
+    const upstreamHtml = upstreams.length > 0
+      ? upstreams.map(h => `<span class="lineage-hash" onclick="Panels.query.goHash('${h}')">${fmt.hash(h)}</span>`).join('')
+      : '<span style="color:var(--text3);font-size:11px">none</span>';
+
+    const derivHtml = derivatives.length > 0
+      ? derivatives.map(h => `<span class="lineage-hash" onclick="Panels.query.goHash('${h}')">${fmt.hash(h)}</span>`).join('')
+      : '<span style="color:var(--text3);font-size:11px">none</span>';
+
+    container.innerHTML = `
+      ${warrantHtml}
+      <div class="query-result">
+        <div class="result-block">
+          <div class="rb-header">
+            <span class="rb-title">trust score</span>
+            <span class="rb-value ${scoreClass}">${fmt.score(score)}</span>
+          </div>
+          <div class="score-bar">
+            <div class="score-fill ${passes(score) ? '' : 'warn'}" style="width:${pct}%"></div>
+            <div class="score-threshold"></div>
+          </div>
+          <div class="kv-grid">
+            <div class="kv-item"><div class="kv-key">hash</div><div class="kv-val hash" onclick="copyText('${hash}')" title="${hash}">${fmt.hash(hash)}</div></div>
+            <div class="kv-item"><div class="kv-key">architecture</div><div class="kv-val">${fmt.arch(entry.architecture)}</div></div>
+            <div class="kv-item"><div class="kv-key">parameters</div><div class="kv-val">${fmt.params(entry.parameter_count)}</div></div>
+            <div class="kv-item"><div class="kv-key">version</div><div class="kv-val">${entry.version || '—'}</div></div>
+            <div class="kv-item"><div class="kv-key">source</div><div class="kv-val">${entry.connector_source || '—'}</div></div>
+            <div class="kv-item"><div class="kv-key">attestations</div><div class="kv-val ${attestations.length > 0 ? 'accent' : ''}">${attestations.length}</div></div>
+            <div class="kv-item" style="grid-column:1/-1"><div class="kv-key">description</div><div class="kv-val" style="white-space:normal">${entry.description || '—'}</div></div>
+          </div>
+        </div>
+
+        ${attestations.length > 0 ? `
+        <div class="result-block">
+          <div class="rb-header"><span class="rb-title">attestations</span></div>
+          <div class="attestation-list">${attRows}</div>
+        </div>` : ''}
+
+        ${convergenceHashes.length > 1 ? `
+        <div class="result-block">
+          <div class="rb-header">
+            <span class="rb-title">convergence</span>
+            <span class="rb-value accent">${convergenceHashes.length}</span>
+          </div>
+          <div class="lineage-section">
+            <div class="lineage-label">independent registrations of same weights</div>
+            <div>${convergenceHashes
+              .filter(h => h !== hash)
+              .map(h => `<span class="lineage-hash" onclick="Panels.query.goHash('${h}')">${fmt.hash(h)}</span>`)
+              .join('')}
+            </div>
+          </div>
+        </div>` : ''}
+
+        <div class="result-block">
+          <div class="rb-header"><span class="rb-title">lineage</span></div>
+          <div class="lineage-section">
+            <div class="lineage-label">upstream</div>
+            <div>${upstreamHtml}</div>
+          </div>
+          <div class="lineage-section" style="border-top:1px solid var(--border)">
+            <div class="lineage-label">derivatives</div>
+            <div>${derivHtml}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  async renderAgent(container, pubkey) {
+    const [rep, manifests] = await Promise.all([
+      Api.get(`/agent/${pubkey}/reputation`).catch(() => ({})),
+      Api.get(`/agent/${pubkey}/manifests`).catch(() => []),
+    ]);
+
+    const deltaClass = rep.score_delta >= 0 ? 'up' : 'down';
+    const manifestRows = manifests.map(m => {
+      const e = m.entry || {};
+      return `<div class="manifest-row" onclick="Panels.query.goHash('${m.hash}')">
+        <div class="mr-hash hash">${fmt.hash(m.hash)} <span style="color:var(--text3)">${e.architecture || ''}</span></div>
+        <div class="mr-arch">${fmt.params(e.parameter_count)}</div>
+        <div class="mr-score">—</div>
+      </div>`;
+    }).join('');
+
+    container.innerHTML = `
+      <div class="query-result">
+        <div class="result-block">
+          <div class="rb-header">
+            <span class="rb-title">agent</span>
+            <span class="rb-value ${passes(rep.score) ? 'accent' : 'warn'}">${fmt.score(rep.score)}</span>
+          </div>
+          <div class="kv-grid">
+            <div class="kv-item"><div class="kv-key">pubkey</div><div class="kv-val hash" onclick="copyText('${pubkey}')">${fmt.hash(pubkey)}</div></div>
+            <div class="kv-item"><div class="kv-key">trajectory</div><div class="kv-val ${deltaClass}">${fmt.delta(rep.score_delta)}</div></div>
+            <div class="kv-item"><div class="kv-key">attestations</div><div class="kv-val">${rep.attestation_count ?? 0}</div></div>
+            <div class="kv-item"><div class="kv-key">warrants</div><div class="kv-val ${rep.warrant_count > 0 ? 'warn' : ''}">${rep.warrant_count ?? 0}</div></div>
+          </div>
+        </div>
+        ${manifests.length > 0 ? `
+        <div class="result-block">
+          <div class="rb-header"><span class="rb-title">manifests (${manifests.length})</span></div>
+          ${manifestRows}
+        </div>` : ''}
+      </div>
+    `;
+  },
+
+  async renderConvergence(container, contentHash) {
+    const hashes = await Api.get(`/content/${encodeURIComponent(contentHash)}/manifests`).catch(() => []);
+    container.innerHTML = `
+      <div class="query-result">
+        <div class="result-block">
+          <div class="rb-header">
+            <span class="rb-title">convergence</span>
+            <span class="rb-value ${hashes.length > 1 ? 'accent' : 'neutral'}">${hashes.length}</span>
+          </div>
+          <div class="kv-grid">
+            <div class="kv-item" style="grid-column:1/-1">
+              <div class="kv-key">content hash</div>
+              <div class="kv-val">${contentHash}</div>
+            </div>
+          </div>
+          <div class="lineage-section">
+            <div class="lineage-label">independent registrations</div>
+            <div>${hashes.length > 0
+              ? hashes.map(h => `<span class="lineage-hash" onclick="Panels.query.goHash('${h}')">${fmt.hash(h)}</span>`).join('')
+              : '<span style="color:var(--text3);font-size:11px">none found</span>'
+            }</div>
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  goHash(hash) {
+    document.getElementById('search-input').value = hash;
+    this.search(hash);
+  },
+};
+
+document.getElementById('search-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    const val = e.target.value.trim();
+    if (val) Panels.query.search(val);
+  }
+});
+
+// ─── Status Panel ────────────────────────────────
+
+Panels.status = {
+  async onActivate() { await this.render(); },
+  async render() {
+    if (!State.agent) return;
+    const body = document.getElementById('status-body');
+
+    const [rep, manifests, netState] = await Promise.all([
+      Api.get(`/agent/${State.agent}/reputation`).catch(() => ({})),
+      Api.get(`/agent/${State.agent}/manifests`).catch(() => []),
+      Api.get('/network/state').catch(() => ({})),
+    ]);
+
+    State.reputation = rep;
+    State.networkState = netState;
+    State.myManifests = manifests;
+
+    const deltaClass = (rep.score_delta || 0) >= 0 ? 'up' : 'down';
+    const progress = netState.attestation_count
+      ? netState.attestation_count / netState.next_fibonacci_threshold
+      : 0;
+
+    const phaseLabel = netState.phase === 0 ? 'GENESIS' : 'GOVERNED';
+    const phaseClass = netState.phase === 0 ? 'genesis' : 'governed';
+
+    const manifestRows = manifests.slice(0, 10).map(m => {
+      const e = m.entry || {};
+      return `<div class="manifest-row" onclick="Router.navigate('query');Panels.query.goHash('${m.hash}')">
+        <div class="mr-hash">${fmt.hash(m.hash)} <span style="color:var(--text3)">${e.architecture || ''}</span></div>
+        <div class="mr-arch">${fmt.params(e.parameter_count)}</div>
+        <div class="mr-score">—</div>
+      </div>`;
+    }).join('');
+
+    body.innerHTML = `
+      <div class="status-grid">
+        <div class="stat-card">
+          <div class="stat-label">reputation</div>
+          <div class="stat-value ${passes(rep.score) ? 'accent' : 'warn'}">${fmt.score(rep.score)}</div>
+          <div class="stat-sub ${deltaClass}">${fmt.delta(rep.score_delta)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">attestations</div>
+          <div class="stat-value">${rep.attestation_count ?? 0}</div>
+          <div class="stat-sub">warrants: ${rep.warrant_count ?? 0}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">manifests</div>
+          <div class="stat-value">${manifests.length}</div>
+          <div class="stat-sub">${phaseClass === 'genesis' ? 'genesis phase' : 'governed phase'}</div>
+        </div>
+      </div>
+
+      <div class="fib-progress">
+        <div class="fib-label">
+          <span>fibonacci cycle ${netState.cycle ?? 0}</span>
+          <span>${netState.attestation_count ?? 0} / ${netState.next_fibonacci_threshold ?? 21}</span>
+        </div>
+        <div class="fib-bar">
+          <div class="fib-fill" style="width:${Math.min(100, progress * 100).toFixed(1)}%"></div>
+        </div>
+      </div>
+
+      <div class="section-head">agent</div>
+      <div class="phi-table">
+        <div class="phi-row">
+          <span class="phi-name">pubkey</span>
+          <span class="phi-val hash" onclick="copyText('${State.agent}')">${fmt.hash(State.agent)}</span>
+        </div>
+        <div class="phi-row">
+          <span class="phi-name">credit supply</span>
+          <span class="phi-val">${netState.credit_supply?.toLocaleString() ?? '—'}</span>
+        </div>
+        <div class="phi-row">
+          <span class="phi-name">network phase</span>
+          <span class="phi-val"><span class="phase-badge ${phaseClass}">${phaseLabel}</span></span>
+        </div>
+      </div>
+
+      ${manifests.length > 0 ? `
+      <div class="section-head">registered manifests</div>
+      ${manifestRows}
+      ` : ''}
+    `;
+  },
+};
+
+// ─── Network Panel ───────────────────────────────
+
+Panels.network = {
+  async onActivate() { await this.render(); },
+  async render() {
+    const body = document.getElementById('network-body');
+    const state = State.networkState || await Api.get('/network/state').catch(() => ({}));
+    State.networkState = state;
+
+    const progress = state.attestation_count
+      ? state.attestation_count / state.next_fibonacci_threshold
+      : 0;
+
+    body.innerHTML = `
+      <div class="status-grid" style="grid-template-columns:1fr 1fr 1fr 1fr">
+        <div class="stat-card">
+          <div class="stat-label">attestations</div>
+          <div class="stat-value accent">${state.attestation_count ?? 0}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">credit supply</div>
+          <div class="stat-value">${state.credit_supply?.toLocaleString() ?? '—'}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">next threshold</div>
+          <div class="stat-value">${state.next_fibonacci_threshold ?? 21}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">cycle</div>
+          <div class="stat-value">${state.cycle ?? 0}</div>
+        </div>
+      </div>
+
+      <div class="fib-progress">
+        <div class="fib-label">
+          <span>progress to next fibonacci threshold</span>
+          <span>${(progress * 100).toFixed(1)}%</span>
+        </div>
+        <div class="fib-bar">
+          <div class="fib-fill" style="width:${Math.min(100, progress * 100).toFixed(1)}%"></div>
+        </div>
+      </div>
+
+      <div class="section-head">φ-derived constants</div>
+      <div class="phi-table">
+        <div class="phi-row"><span class="phi-name">quorum threshold</span><span class="phi-val">total_rep / φ² = total / 2.618</span></div>
+        <div class="phi-row"><span class="phi-name">pass threshold</span><span class="phi-val">φ⁻¹ = 0.618</span></div>
+        <div class="phi-row"><span class="phi-name">admission gate closes</span><span class="phi-val">honest_rep &lt; φ⁻¹ = 0.618</span></div>
+        <div class="phi-row"><span class="phi-name">reveal window opens</span><span class="phi-val">commit_weight ≥ total / φ⁴</span></div>
+        <div class="phi-row"><span class="phi-name">reveal deadline</span><span class="phi-val">φ⁴ × 10s = 68.5s</span></div>
+        <div class="phi-row"><span class="phi-name">credit expansion</span><span class="phi-val">supply × φ = supply × 1.618</span></div>
+        <div class="phi-row"><span class="phi-name">new agent reputation</span><span class="phi-val">avg_rep / φ² = avg / 2.618</span></div>
+        <div class="phi-row"><span class="phi-name">convergence score</span><span class="phi-val">1 − φ⁻ⁿ (n = registrations)</span></div>
+        <div class="phi-row"><span class="phi-name">min validators</span><span class="phi-val">3</span></div>
+        <div class="phi-row"><span class="phi-name">bootstrap threshold</span><span class="phi-val">21 attestations (fib)</span></div>
+      </div>
+
+      <div class="section-head">credit history</div>
+      <div class="phi-table">
+        <div class="phi-row" style="color:var(--text3);font-size:10px">
+          <span>crossing → attestations → supply</span><span></span>
+        </div>
+        ${[
+          [1,13,987],[2,21,1596],[3,34,2581],[4,55,4177],[5,89,6755]
+        ].map(([c,a,s]) =>
+          `<div class="phi-row">
+            <span class="phi-name" style="color:var(--text3)">crossing ${c} · att ${a}</span>
+            <span class="phi-val">${s.toLocaleString()}</span>
+          </div>`
+        ).join('')}
+      </div>
+    `;
+  },
+};
+
+// ─────────────────────────────────────────────────
+// Signal Stream
+// ─────────────────────────────────────────────────
+
+function connectSignals() {
+  const es = new EventSource(SIGNALS_URL);
+
+  es.onmessage = (event) => {
+    try {
+      const signal = JSON.parse(event.data);
+      const payload = signal?.value?.payload || signal;
+      const type = payload?.type;
+      if (!type) return;
+
+      const hash =
+        payload.request_hash ||
+        payload.quorum_bundle_hash ||
+        payload.action_hash || '';
+
+      Panels.monitor.addEvent(type, fmt.hash(hash), payload);
+
+      // Refresh network state quietly
+      if (type === 'AttestationCreated' || type === 'QuorumReached') {
+        Api.get('/network/state').then(s => {
+          State.networkState = s;
+          updateStatusBar(s);
+        }).catch(() => {});
+      }
+    } catch(e) {}
+  };
+
+  es.onopen = () => {
+    State.connected = true;
+    updateConnectionStatus(true);
+  };
+
+  es.onerror = () => {
+    State.connected = false;
+    updateConnectionStatus(false);
+    es.close();
+    setTimeout(connectSignals, 5000);
+  };
+}
+
+function updateConnectionStatus(connected) {
+  const dot = document.getElementById('conn-dot');
+  const label = document.getElementById('conn-status');
+  dot.className = `status-dot${connected ? '' : ' offline'}`;
+  label.textContent = connected ? 'connected' : 'reconnecting';
+}
+
+// ─────────────────────────────────────────────────
+// Status bar
+// ─────────────────────────────────────────────────
+
+function updateStatusBar(state) {
+  if (!state) return;
+  document.getElementById('sb-att').textContent = state.attestation_count ?? '—';
+  document.getElementById('sb-threshold').textContent = state.next_fibonacci_threshold ?? '—';
+  document.getElementById('sb-supply').textContent = state.credit_supply?.toLocaleString() ?? '—';
+  document.getElementById('sb-phase').textContent = state.phase === 0 ? 'genesis' : 'governed';
+}
+
+// ─────────────────────────────────────────────────
+// Clock
+// ─────────────────────────────────────────────────
+
+function updateClock() {
+  document.getElementById('tb-time').textContent = new Date().toISOString().slice(0,19).replace('T', ' ') + 'Z';
+}
+updateClock();
+setInterval(updateClock, 1000);
+
+// ─────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────
+
+async function init() {
+  // Agent identity
+  try {
+    const { agent } = await Api.get('/agent/me');
+    State.agent = agent;
+    const keyEl = document.getElementById('agent-key');
+    keyEl.textContent = fmt.hash(agent);
+    keyEl.title = agent;
+    keyEl.onclick = () => copyText(agent);
+  } catch(e) {}
+
+  // Network state
+  try {
+    const state = await Api.get('/network/state');
+    State.networkState = state;
+    updateStatusBar(state);
+  } catch(e) {}
+
+  // Signals
+  connectSignals();
+
+  // Poll network state every 10s
+  setInterval(async () => {
+    try {
+      const s = await Api.get('/network/state');
+      State.networkState = s;
+      updateStatusBar(s);
+    } catch(e) {}
+  }, 10000);
+}
+
+Panels.browse = {
+  loaded: false,
+  async onActivate() {
+    if (!this.loaded) await this.render();
+  },
+  async render() {
+    const body = document.getElementById('browse-body');
+    body.innerHTML = '<div class="empty loading">fetching manifests</div>';
+    try {
+      const manifests = await Api.get('/manifests');
+      if (!manifests.length) {
+        body.innerHTML = '<div class="empty">no manifests registered yet</div>';
+        return;
+      }
+
+      // Fetch registering agent reputations
+      const agentReps = {};
+      await Promise.all([...new Set(manifests.map(m => m.author))].map(async a => {
+        try {
+          const rep = await Api.get(`/agent/${a}/reputation`);
+          agentReps[a] = rep.score ?? 0;
+        } catch(e) { agentReps[a] = 0; }
+      }));
+
+      const rows = manifests.map((m, i) => {
+        const e = m.entry || {};
+        const agentRep = agentReps[m.author] ?? 0;
+        const scoreClass = m.passes ? 'pass' : '';
+        const rank = i + 1;
+        return `
+          <div class="manifest-row" style="grid-template-columns:32px 1fr 80px 70px 70px 70px"
+            onclick="Router.navigate('query');Panels.query.goHash('${m.hash}')">
+            <div style="color:var(--text3);font-size:11px">${rank}</div>
+            <div class="mr-hash">
+              <span style="color:var(--text)">${e.architecture || '—'}</span>
+              <span style="color:var(--text3);margin-left:8px">${fmt.params(e.parameter_count)}</span>
+              <span style="color:var(--text3);margin-left:8px;font-size:10px">${e.connector_source || ''}</span>
+            </div>
+            <div class="mr-score ${scoreClass}">${fmt.score(m.score)}</div>
+            <div style="font-size:11px;color:var(--text3);text-align:right">${m.attestation_count}</div>
+            <div style="font-size:11px;color:var(--text3);text-align:right">${fmt.score(agentRep)}</div>
+            <div class="hash" style="font-size:10px;text-align:right" onclick="event.stopPropagation();Router.navigate('query');Panels.query.goHash('${m.author}')">${fmt.hash(m.author)}</div>
+          </div>
+        `;
+      }).join('');
+
+      body.innerHTML = `
+        <div style="display:grid;grid-template-columns:32px 1fr 80px 70px 70px 70px;padding:8px 24px;font-size:9px;color:var(--text3);letter-spacing:0.1em;text-transform:uppercase;border-bottom:1px solid var(--border)">
+          <div>#</div><div>model</div><div style="text-align:right">score</div>
+          <div style="text-align:right">att</div>
+          <div style="text-align:right">agent rep</div>
+          <div style="text-align:right">agent</div>
+        </div>
+        ${rows}
+      `;
+      this.loaded = true;
+    } catch(e) {
+      body.innerHTML = `<div class="empty">error: ${e.message}</div>`;
+    }
+  },
+};
+
+init();
+</script>
+</body>
+</html>

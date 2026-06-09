@@ -1,6 +1,6 @@
 manifest_version: '0'
-name: poi
+name: toric
 ui:
   path: ../ui/dist.zip
 happ:
-  path: ./poi.happ
+  path: ./toric.happ

@@ -33,6 +33,7 @@ pub struct NetworkState {
     pub next_fibonacci_threshold: u64,
     pub credit_supply: i64,
     pub cycle: u64,
+    pub phase: u8,  
 }
 
 #[derive(Serialize, Deserialize)]

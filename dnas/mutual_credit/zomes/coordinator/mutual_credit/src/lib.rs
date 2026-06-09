@@ -2,31 +2,30 @@ use hdk::prelude::*;
 use mutual_credit_integrity::*;
 
 const PHI: f64 = 1.6180339887498948;
-const PHI_SQ: f64 = 2.6180339887498948;
+const PHI_4: f64 = 6.8541019662496847;
 const INV_PHI: f64 = 0.6180339887498948;
 const INV_PHI_SQ: f64 = 0.3819660112501051;
-const GENESIS_CREDIT_SUPPLY: i64 = 1000;
-const MIN_VALIDATORS: u32 = 3;
+const GENESIS_CREDIT_SUPPLY: i64 = 987;
 
-fn starting_reputation(network_avg: f64) -> f64 {
-    (network_avg / PHI_SQ).max(0.01)
-}
 
-fn admission_allowance(honest_rep_fraction: f64) -> u32 {
+fn admission_allowance(honest_rep_fraction: f64, attestation_count: u64, next_threshold: u64) -> u32 {
     if honest_rep_fraction <= INV_PHI {
         return 0;
     }
+    let prev = previous_fibonacci(attestation_count);
+    let cycle_progress = if next_threshold == prev {
+        1.0
+    } else {
+        (attestation_count - prev) as f64 / (next_threshold - prev) as f64
+    };
     let margin = honest_rep_fraction - INV_PHI;
-    ((margin * PHI * 10.0).floor() as u32).max(1)
+    (margin * 4.0 * cycle_progress).floor() as u32
 }
 
 fn expand_credit_supply(current: i64) -> i64 {
     (current as f64 * PHI).floor() as i64
 }
 
-fn base_reward_unit(credit_supply: i64, validator_count: u32) -> f64 {
-    credit_supply as f64 / (validator_count as f64 * 10.0)
-}
 
 fn next_fibonacci(n: u64) -> u64 {
     let mut a: u64 = 1;
@@ -39,23 +38,20 @@ fn next_fibonacci(n: u64) -> u64 {
     }
 }
 
-fn compute_network_avg_reputation(
-    registry_cell_id: CellId,
-    agents: Vec<AgentPubKey>,
-) -> f64 {
-    if agents.is_empty() { return 0.5; }
-    let total: f64 = agents.iter().filter_map(|agent| {
-        get_reputation_score(agent.clone(), registry_cell_id.clone()).ok()
-    }).sum();
-    total / agents.len() as f64
+fn previous_fibonacci(n: u64) -> u64 {
+    let mut a: u64 = 1;
+    let mut b: u64 = 1;
+    loop {
+        let c = a + b;
+        if c >= n { return a; }
+        a = b;
+        b = c;
+    }
 }
 
 fn default_credit_limit() -> i64 {
-    -((GENESIS_CREDIT_SUPPLY as f64 * INV_PHI_SQ) as i64)
-}
-
-fn validation_reward(credit_supply: i64, validator_count: u32) -> i64 {
-    base_reward_unit(credit_supply, validator_count) as i64
+    let supply = GENESIS_CREDIT_SUPPLY;
+    -((supply as f64 * INV_PHI_SQ) as i64)
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -73,6 +69,7 @@ pub struct TransactInput {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UpdateCreditLimitInput {
     pub agent: AgentPubKey,
+    pub registry_dna_hash: DnaHash,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -131,14 +128,18 @@ fn get_reputation_score(agent: AgentPubKey, registry_cell_id: CellId) -> ExternR
             })?;
             Ok(score.score)
         }
-        _ => Ok(0.5),
+        _ => Ok(INV_PHI_SQ),
     }
 }
 
-fn compute_credit_limit(reputation_score: f64) -> i64 {
-    let limit = -((GENESIS_CREDIT_SUPPLY as f64 * INV_PHI_SQ
-        + reputation_score * GENESIS_CREDIT_SUPPLY as f64 * PHI) as i64);
-    limit.max(-10000)
+fn compute_credit_limit(reputation_score: f64, credit_supply: i64) -> i64 {
+    let lower = credit_supply as f64 * INV_PHI_SQ;  // φ⁻² — zero reputation
+    let upper = credit_supply as f64 * INV_PHI;      // φ⁻¹ — full reputation
+    // φ-weighted interpolation — reputation compounds geometrically not linearly
+    let t = reputation_score.powf(PHI);
+    let limit = -((lower + t * (upper - lower)) as i64);
+    let ceiling = -(next_fibonacci(credit_supply as u64) as i64);
+    limit.max(ceiling)
 }
 
 fn compute_balance(agent: &AgentPubKey) -> ExternResult<i64> {
@@ -183,12 +184,58 @@ fn get_current_credit_limit(agent: &AgentPubKey) -> ExternResult<i64> {
 
 #[hdk_extern]
 pub fn init(_: ()) -> ExternResult<InitCallbackResult> {
+    let mut fns: HashSet<(ZomeName, FunctionName)> = HashSet::new();
+    fns.insert((zome_info()?.name, FunctionName::from("on_attestation_created")));
+    create_cap_grant(CapGrantEntry {
+        tag: "bridge".into(),
+        access: CapAccess::Unrestricted,
+        functions: GrantedFunctions::Listed(fns),
+    })?;
     Ok(InitCallbackResult::Pass)
 }
 
 #[hdk_extern]
 pub fn create_account(input: CreateAccountInput) -> ExternResult<ActionHash> {
     let agent = agent_info()?.agent_initial_pubkey;
+
+    let current = get_current_network_state()?;
+
+    match &current {
+        None => {
+            // No state at all — absolute genesis, first agent ever
+            // Always allow, no check needed
+        }
+        Some(state) => {
+            match state.phase {
+                0 => {
+                    // Genesis phase — open admission
+                    // Founders operate before the geometry can enforce itself
+                    // This window closes permanently when cycle 1 begins
+                }
+                _ => {
+                    // Governed phase — geometry enforces admission
+                    // Gate opens proportionally to validation work done
+                    // in current Fibonacci cycle
+                    // TODO: replace 1.0 with registry bridge call for real
+                    // honest_rep_fraction once that infrastructure exists
+                    let honest_rep_fraction = 1.0;
+                    let allowance = admission_allowance(
+                        honest_rep_fraction,
+                        state.attestation_count,
+                        state.next_fibonacci_threshold,
+                    );
+                    if allowance == 0 {
+                        return Err(wasm_error!(WasmErrorInner::Guest(
+                            "Admission gate closed — network in governed phase, \
+                             no allowance available in current Fibonacci cycle. \
+                             Allowance opens as validators complete attestations.".to_string()
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
     let account = Account {
         agent: agent.clone(),
         credit_limit: default_credit_limit(),
@@ -247,15 +294,16 @@ pub fn get_balance(input: GetBalanceInput) -> ExternResult<BalanceResult> {
 
 #[hdk_extern]
 pub fn update_credit_limit(input: UpdateCreditLimitInput) -> ExternResult<ActionHash> {
-    let dna_info = dna_info()?;
-    let registry_cell_id = CellId::new(dna_info.hash, input.agent.clone());
+    let registry_cell_id = CellId::new(input.registry_dna_hash.clone(), input.agent.clone());
 
     let reputation = get_reputation_score(
         input.agent.clone(),
         registry_cell_id,
     ).unwrap_or(0.0);
 
-    let new_limit = compute_credit_limit(reputation);
+    let current_state = get_current_network_state()?;
+    let credit_supply = current_state.map(|s| s.credit_supply).unwrap_or(GENESIS_CREDIT_SUPPLY);
+    let new_limit = compute_credit_limit(reputation, credit_supply);
 
     let metadata = {
         let json = serde_json::json!({
@@ -284,7 +332,9 @@ pub fn update_credit_limit(input: UpdateCreditLimitInput) -> ExternResult<Action
 
 #[hdk_extern]
 pub fn reward_validator(input: RewardValidatorInput) -> ExternResult<ActionHash> {
-    let reward = validation_reward(GENESIS_CREDIT_SUPPLY, MIN_VALIDATORS);
+    let current_state = get_current_network_state()?;
+    let credit_supply = current_state.map(|s| s.credit_supply).unwrap_or(GENESIS_CREDIT_SUPPLY);
+    let reward = (credit_supply as f64 / PHI_4) as i64;
 
     let metadata = {
         let json = serde_json::json!({
@@ -388,7 +438,7 @@ pub struct FibonacciResult {
 }
 
 #[hdk_extern]
-pub fn on_attestation_created(input: AttestationNotification) -> ExternResult<FibonacciResult> {
+pub fn on_attestation_created(_input: AttestationNotification) -> ExternResult<FibonacciResult> {
     // Get or initialize network state
     let current = get_current_network_state()?;
 
@@ -402,26 +452,25 @@ pub fn on_attestation_created(input: AttestationNotification) -> ExternResult<Fi
         None => BOOTSTRAP_ATTESTATIONS,
     };
 
-    // Check if we crossed a Fibonacci threshold
+   
     if attestation_count >= current_threshold {
-        // Expand credit supply by φ
+        
         let new_supply = expand_credit_supply(credit_supply);
         let next_threshold = next_fibonacci(attestation_count);
 
-        // Write new network state
+      
         let new_state = NetworkState {
             attestation_count,
             next_fibonacci_threshold: next_threshold,
             credit_supply: new_supply,
             cycle: cycle + 1,
+            phase: 1,  
         };
         write_network_state(new_state)?;
 
-        // Compute admission allowance
-        // In production this would query honest rep fraction from Registry
-        // For now use a conservative default of 0.8
-        let honest_rep_fraction = 0.8_f64;
-        let allowance = admission_allowance(honest_rep_fraction);
+
+        let honest_rep_fraction = INV_PHI;
+        let allowance = admission_allowance(honest_rep_fraction, attestation_count, next_threshold);
 
         Ok(FibonacciResult {
             attestation_count,
@@ -431,13 +480,17 @@ pub fn on_attestation_created(input: AttestationNotification) -> ExternResult<Fi
             next_threshold,
         })
     } else {
-        // No threshold crossed — just update count
+       
         let next_threshold = current_threshold;
         let new_state = NetworkState {
             attestation_count,
             next_fibonacci_threshold: next_threshold,
             credit_supply,
             cycle,
+            phase: match current {
+                Some(ref s) => s.phase,
+                None => 0,
+            },
         };
         write_network_state(new_state)?;
 
