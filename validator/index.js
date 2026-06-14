@@ -10,10 +10,30 @@ import crypto from 'crypto';
 
 const BASE_URL = process.env.TORIC_API || process.env.POI_API || 'http://localhost:3000';
 const API = BASE_URL + '/v1';
-const AGENT         = process.env.TORIC_AGENT  || process.env.POI_AGENT  || '';
-const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '30000');
-const DRY_RUN       = process.env.DRY_RUN === 'true';
-const HF_TOKEN      = process.env.HF_TOKEN     || null;
+const AGENT   = process.env.TORIC_AGENT || process.env.POI_AGENT || '';
+const DRY_RUN = process.env.DRY_RUN === 'true';
+const HF_TOKEN = process.env.HF_TOKEN || null;
+
+// ─────────────────────────────────────────────
+// Geometry constants
+// All timing derived from TAU_MS — base network tick.
+// Conservative WAN estimate. Becomes a GeometryParam in Phase 5.5.
+// ─────────────────────────────────────────────
+const TAU_MS    = 10_000;
+const PHI       = 1.6180339887498948;
+const PHI_SQ    = 2.6180339887498948;
+const PHI_CU    = 4.2360679774997896;
+const PHI_4     = 6.8541019662496847;
+const INV_PHI   = 0.6180339887498948;
+const MIN_VALIDATORS = 3; // F(4) — mirrors Rust constant
+
+const POLL_INTERVAL_MS        = TAU_MS * PHI;           // fallback poll: ~16.18s
+const RECONNECT_DELAY_MS      = Math.round(TAU_MS / PHI_SQ);  // ~3820ms
+const POST_SUBMIT_WAIT_MS     = Math.round(TAU_MS / PHI_CU);  // ~2361ms
+const REVEAL_POLL_INTERVAL_MS = Math.round(TAU_MS / PHI_SQ);  // ~3820ms
+const INTER_REQUEST_DELAY_MS  = Math.round(TAU_MS / PHI_4);   // ~1459ms
+const REVEAL_DEADLINE_MS      = PHI_4 * TAU_MS * MIN_VALIDATORS; // mirrors Rust
+const REVEAL_POLL_ATTEMPTS    = Math.ceil(REVEAL_DEADLINE_MS / REVEAL_POLL_INTERVAL_MS);
 
 console.log('Toric Validator Client v2');
 console.log('API:', API);
@@ -303,7 +323,9 @@ async function processRequest(request, agent) {
 
   // Phase 1 — commit
   const salt = crypto.randomBytes(32).toString('hex');
-  const preimage = `${result.passed}:${result.score}:${result.details || ''}:${salt}`;
+  // Score normalized to 6 decimal places — matches Rust's {:.6} format.
+  // Prevents f64 string representation divergence between JS and Rust.
+  const preimage = `${result.passed}:${result.score.toFixed(6)}:${result.details || ''}:${salt}`;
   const commitmentHash = crypto.createHash('sha256').update(preimage).digest('hex');
 
   console.log('  committing...');
@@ -329,9 +351,12 @@ async function processRequest(request, agent) {
 
   // Wait for reveal window — poll until φ⁴ threshold crossed
   console.log('  waiting for reveal window...');
+  // Poll until reveal window opens or deadline expires.
+  // Poll interval: τ/φ² — frequent enough to catch the window without hammering.
+  // Attempts: ceil(REVEAL_DEADLINE / poll_interval) — deadline-derived, not arbitrary.
   let windowOpen = false;
-  for (let i = 0; i < 10; i++) {
-    await new Promise(r => setTimeout(r, 3000));
+  for (let i = 0; i < REVEAL_POLL_ATTEMPTS; i++) {
+    await new Promise(r => setTimeout(r, REVEAL_POLL_INTERVAL_MS));
     try {
       const windowRes = await fetch(`${API}/validation/reveal-window`, {
         method: 'POST',
@@ -339,7 +364,7 @@ async function processRequest(request, agent) {
         body: JSON.stringify({ request_hash: requestHash }),
       });
       const windowData = await windowRes.json();
-      console.log(`  reveal window: ${windowData.reveal_window_open ? 'OPEN' : 'waiting'} (weight ${windowData.commitment_weight?.toFixed(3)}, threshold ${windowData.phi_4_threshold?.toFixed(3)})`);
+      console.log(`  reveal window: ${windowData.reveal_window_open ? 'OPEN' : 'waiting'} (weight ${windowData.commitment_weight?.toFixed(3)}, threshold ${windowData.phi_4_threshold?.toFixed(3)}) [${i + 1}/${REVEAL_POLL_ATTEMPTS}]`);
       if (windowData.reveal_window_open) {
         windowOpen = true;
         break;
@@ -348,12 +373,50 @@ async function processRequest(request, agent) {
   }
 
   if (!windowOpen) {
-    console.log('  reveal window did not open after 30s — will retry next poll');
+    console.log(`  reveal window did not open within deadline (${(REVEAL_DEADLINE_MS/1000).toFixed(1)}s) — recording timeout evidence`);
+
+    // Record reveal timeout as ValidationEvidence.
+    // Makes the commit-without-reveal visible on the DHT permanently.
+    // Feeds into total_commits/total_reveals ratio in ReputationCache.
+    // The geometry compounds the cost over time without additional enforcement.
+    if (!DRY_RUN) {
+      try {
+        const evidenceRes = await fetch(`${API}/evidence`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            manifest_hash: manifestHash,
+            evidence_type: 'reveal_timeout',
+            expected: String(MIN_VALIDATORS),
+            actual: '0',
+            metadata: {
+              validator: AGENT,
+              request_hash: requestHash,
+              deadline_ms: REVEAL_DEADLINE_MS,
+              detected_at: new Date().toISOString(),
+            },
+          }),
+        });
+        const evidenceData = await evidenceRes.json();
+        if (evidenceData.hash) {
+          console.log(`  timeout evidence recorded: ${evidenceData.hash.slice(0, 20)}...`);
+          console.log(`  computed severity: ${evidenceData.computed_severity}`);
+        } else {
+          console.log(`  evidence error: ${evidenceData.error}`);
+        }
+      } catch(e) {
+        console.log(`  error recording timeout evidence: ${e.message}`);
+      }
+    } else {
+      console.log(`  [DRY RUN] would record reveal_timeout evidence`);
+    }
+
     return;
   }
 
   // Phase 2 — reveal
   console.log('  revealing...');
+  let revealSucceeded = false;
   try {
     const revealRes = await fetch(`${API}/validation/reveal`, {
       method: 'POST',
@@ -367,10 +430,86 @@ async function processRequest(request, agent) {
       }),
     });
     const revealData = await revealRes.json();
-    if (revealData.hash) console.log('  revealed:', revealData.hash.slice(0, 20) + '...');
-    else console.log('  reveal error:', revealData.error);
+    if (revealData.hash) {
+      console.log('  revealed:', revealData.hash.slice(0, 20) + '...');
+      revealSucceeded = true;
+    } else {
+      console.log('  reveal error:', revealData.error);
+    }
   } catch(e) {
     console.log('  error revealing:', e.message);
+  }
+
+  if (!revealSucceeded) return;
+
+  // Wait for quorum to propagate before pulling credit update
+  await new Promise(r => setTimeout(r, POST_SUBMIT_WAIT_MS));
+
+  // Check if quorum reached — pull model, not push
+  let quorumReached = false;
+  let agreedWithConsensus = false;
+  try {
+    const qRes = await fetch(`${API}/validation/quorum`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_hash: requestHash }),
+    });
+    const qData = await qRes.json();
+    quorumReached = qData.reached || false;
+    console.log('  quorum:', quorumReached ? 'REACHED ✓' : 'not yet',
+      `(${qData.evaluation_count} evals, weight ${qData.combined_weight?.toFixed(3)})`);
+
+    // Determine if this validator agreed with consensus
+    // Consensus passed if quorum reached — quorum requires passing_weight >= threshold
+    agreedWithConsensus = result.passed === quorumReached;
+  } catch(e) {
+    console.log('  quorum check error:', e.message);
+  }
+
+  if (!quorumReached || DRY_RUN) return;
+
+  // Pull credit limit update for this validator
+  // Each validator pulls their own — no cross-machine push needed
+  try {
+    const agentRes = await fetch(`${API}/agent/me`);
+    const agentData = await agentRes.json();
+    const myPubkey = agentData.agent;
+
+    const creditRes = await fetch(`${API}/agent/${myPubkey}/credit-update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const creditData = await creditRes.json();
+    if (creditData.hash) {
+      console.log('  credit limit updated:', creditData.hash.slice(0, 20) + '...');
+    } else {
+      console.log('  credit update skipped:', creditData.error || 'no change');
+    }
+  } catch(e) {
+    console.log('  credit update error:', e.message);
+  }
+
+  // Record convergence signal for this validator
+  // Each validator records their own — no cross-machine push needed
+  try {
+    const agentRes = await fetch(`${API}/agent/me`);
+    const agentData = await agentRes.json();
+    const myPubkey = agentData.agent;
+
+    const convRes = await fetch(`${API}/agent/${myPubkey}/convergence`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agreed: agreedWithConsensus,
+        request_hash: requestHash,
+      }),
+    });
+    const convData = await convRes.json();
+    if (convData.hash) {
+      console.log('  convergence recorded:', agreedWithConsensus ? 'agreed ✓' : 'dissented');
+    }
+  } catch(e) {
+    console.log('  convergence error:', e.message);
   }
 }
 
@@ -393,7 +532,7 @@ async function runValidationCycle(agent) {
     console.log('  found', requests.length, 'pending request(s)');
     for (const request of requests) {
       await processRequest(request, agent);
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, INTER_REQUEST_DELAY_MS));
     }
   } catch (e) {
     console.log('  error:', e.message);
@@ -439,7 +578,9 @@ async function start() {
   subscribeToSignals(AGENT);
 
   // Fallback poll every 5 minutes — signals handle liveness
-  setInterval(() => runValidationCycle(AGENT), 5000);
+  // Fallback poll: τ×φ — one network tick plus golden ratio buffer.
+  // Signals handle liveness. This catches anything signals miss.
+  setInterval(() => runValidationCycle(AGENT), POLL_INTERVAL_MS);
 }
 
 async function subscribeToSignals(agent) {
@@ -463,7 +604,7 @@ async function subscribeToSignals(agent) {
             const payload = signal?.value?.payload || signal;
             if (payload?.type === 'ValidationRequested') {
               console.log('[signal] ValidationRequested:', toBase64url(payload.request_hash));
-              await new Promise(r => setTimeout(r, 2000));
+              await new Promise(r => setTimeout(r, POST_SUBMIT_WAIT_MS));
               await runValidationCycle(agent);
             }
           } catch(e) {}
@@ -472,7 +613,7 @@ async function subscribeToSignals(agent) {
     } catch(e) {
       console.log('Signal stream disconnected — reconnecting in 5s...');
     }
-    setTimeout(connect, 5000);
+    setTimeout(connect, RECONNECT_DELAY_MS);
   }
   connect();
 }

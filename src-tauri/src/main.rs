@@ -217,16 +217,10 @@ fn main() {
                 eprintln!("Warning: {}", e);
             }
 
-            // Wait for lair socket before starting conductor
-            let lair_socket = data_dir.join("ks/socket");
-            let lair_start = std::time::Instant::now();
-            while !lair_socket.exists() {
-                if lair_start.elapsed().as_secs() >= 60 {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-
+            // Start conductor directly.
+            // Lair keystore is launched in-process by the conductor itself
+            // (type: lair_server_in_proc) — there is no lair socket to wait
+            // for before starting. Waiting for it is a dead sleep.
             match start_conductor(&resource_dir, &data_dir) {
                 Ok(child) => {
                     state_setup.lock().unwrap().conductor = Some(child);
@@ -237,23 +231,16 @@ fn main() {
                 }
             }
 
+            // Wait for admin websocket to accept connections.
+            // This is the correct readiness signal — if port 44121 is
+            // accepting connections, the conductor is ready to receive
+            // install commands. No additional file or sleep needed.
             println!("Waiting for conductor...");
             if !wait_for_conductor(300) {
-                eprintln!("Conductor timed out after 120s");
+                eprintln!("Conductor timed out after 300s");
                 std::process::exit(1);
             }
             println!("Conductor ready");
-
-            // Wait for conductor database to be ready
-            let db_path = data_dir.join("databases/conductor/conductor");
-            let db_start = std::time::Instant::now();
-            while !db_path.exists() {
-                if db_start.elapsed().as_secs() >= 120 {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2000));
 
             install_happ(resource_dir.clone());
 

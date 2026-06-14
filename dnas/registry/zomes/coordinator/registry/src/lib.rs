@@ -17,6 +17,12 @@ const INV_PHI_SQ: f64 = 0.3819660112501051;
 const INV_PHI_CU: f64 = 0.2360679774997896;
 const INV_PHI_4: f64  = 0.14589803375031546;
 
+// Max upstream recursion depth derived from negligibility threshold.
+// At depth 4, φ⁻⁴ = INV_PHI_4 = 0.1459 — contribution is below the
+// threshold where it meaningfully affects the blended score.
+// Depth 3 is the last level worth computing.
+const MAX_UPSTREAM_DEPTH: u32 = 3;
+
 #[hdk_extern]
 pub fn init(_: ()) -> ExternResult<InitCallbackResult> {
     let mut fns: HashSet<(ZomeName, FunctionName)> = HashSet::new();
@@ -886,7 +892,10 @@ fn compute_direct_score(manifest_hash: &ActionHash) -> ExternResult<(f64, f64, u
                                 }
                             };
 
-                            if dimensional_score >= 0.5 {
+                            // INV_PHI (φ⁻¹ = 0.618) is the geometric pass threshold —
+                            // consistent with the trust score pass threshold.
+                            // Below φ⁻¹: attestation contributes negatively, amplified by φ.
+                            if dimensional_score >= INV_PHI {
                                 score += contribution * dimensional_score;
                             } else {
                                 score -= contribution * (1.0 - dimensional_score) * PHI;
@@ -990,7 +999,7 @@ pub fn compute_trust_score(input: TrustScoreInput) -> ExternResult<TrustScoreRes
     }
 
     let (direct_score, weighted_count, attestation_count) = compute_direct_score(&input.manifest_hash)?;
-    let upstream_score = compute_upstream_score(&input.manifest_hash, 3);
+    let upstream_score = compute_upstream_score(&input.manifest_hash, MAX_UPSTREAM_DEPTH);
 
     let convergence_score = {
         let manifest_record = get(input.manifest_hash.clone(), GetOptions::default())?;

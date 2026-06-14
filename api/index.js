@@ -56,7 +56,16 @@ function queueQuorumCheck(request_hash) {
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || "44121");
 const APP_PORT   = parseInt(process.env.APP_PORT   || "44122");
 const API_PORT   = parseInt(process.env.API_PORT   || "3000");
-const APP_ID     = process.env.APP_ID || "toric";
+// ─────────────────────────────────────────────
+// Geometry constants — timing derived from TAU_MS
+// ─────────────────────────────────────────────
+const TAU_MS   = 10_000;
+const PHI_SQ   = 2.6180339887498948;
+const PHI_CU   = 4.2360679774997896;
+
+const RECONNECT_DELAY_MS  = Math.round(TAU_MS / PHI_SQ);  // ~3820ms
+const POST_SUBMIT_WAIT_MS = Math.round(TAU_MS / PHI_CU);  // ~2361ms
+const SSE_KEEPALIVE_MS    = 15_000; // HTTP convention, not geometric
 
 let appWs  = null;
 let cellId = null;
@@ -105,7 +114,7 @@ async function connect() {
     await adminWs.client.close();
   } catch (e) {
     console.error("Failed to connect:", e.message);
-    setTimeout(connect, 3000);
+    setTimeout(connect, RECONNECT_DELAY_MS);
   }
 }
 
@@ -212,7 +221,7 @@ app.get("/signals", (req, res) => {
   res.setHeader("Connection",    "keep-alive");
   res.flushHeaders();
   sseClients.add(res);
-  const keepalive = setInterval(() => res.write(': keepalive\n\n'), 15000);
+  const keepalive = setInterval(() => res.write(': keepalive\n\n'), SSE_KEEPALIVE_MS);
   req.on("close", () => {
     clearInterval(keepalive);
     sseClients.delete(res);
@@ -268,6 +277,36 @@ v1.get("/agent/:pubkey/attestations", async (req, res) => {
       agent: Buffer.from(req.params.pubkey, "base64url"),
     });
     res.json((records || []).map(formatRecord));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Pull-based credit limit update — called by each validator after quorum
+v1.post("/agent/:pubkey/credit-update", async (req, res) => {
+  try {
+    const { registryDnaHash } = await getDnaHashes();
+    const hash = await mutualCreditCall("update_credit_limit", {
+      agent: Buffer.from(req.params.pubkey, "base64url"),
+      registry_dna_hash: registryDnaHash,
+    });
+    res.json({ hash: toBase64(hash) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Pull-based convergence signal — called by each validator after quorum
+v1.post("/agent/:pubkey/convergence", async (req, res) => {
+  try {
+    const { agreed, request_hash } = req.body;
+    if (agreed === undefined || !request_hash)
+      return res.status(400).json({ error: "agreed and request_hash required" });
+    const agentInfo = await appWs.appInfo();
+    const cell = agentInfo.cell_info["registry"][0].value;
+    const myPubkey = toBase64(cell.cell_id[1]);
+    const hash = await registryCall("record_convergence", {
+      agent: Buffer.from(req.params.pubkey, "base64url"),
+      agreed,
+      request_hash: Buffer.from(request_hash, "base64url"),
+    });
+    res.json({ hash: toBase64(hash) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -450,6 +489,14 @@ function computeSeverity(evidenceType, expected, actual) {
       if (isNaN(total) || total === 0) return 0;
       return Math.min(1_000_000, Math.round((total - passed) / total * 1_000_000));
     }
+    case "reveal_timeout": {
+      // Severity = fraction of MIN_VALIDATORS that failed to reveal × 1_000_000.
+      // expected = MIN_VALIDATORS required, actual = reveals received.
+      const required = parseInt(expected);
+      const received = parseInt(actual);
+      if (isNaN(required) || required === 0) return 0;
+      return Math.min(1_000_000, Math.round((required - received) / required * 1_000_000));
+    }
     default:
       return 0;
   }
@@ -564,7 +611,7 @@ v1.post("/validation/evaluate", async (req, res) => {
       details: details || "",
     });
     console.log("evaluation submitted:", toBase64(hash).slice(0, 20) + "...");
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, POST_SUBMIT_WAIT_MS));
     try {
       const { registryDnaHash, mutualCreditDnaHash } = await getDnaHashes();
       const qResult = await coordinationCall("check_quorum", {
