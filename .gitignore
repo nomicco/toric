@@ -27,3 +27,5 @@
 
 echo "src-tauri/holochain-bin" >> .gitignore
 echo "src-tauri/holochain-nix-closure.tar.gz" >> .gitignore
+
+/data/
