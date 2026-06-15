@@ -5,6 +5,9 @@ const PHI: f64 = 1.6180339887498948;
 const PHI_4: f64 = 6.8541019662496847;
 const INV_PHI: f64 = 0.6180339887498948;
 const INV_PHI_SQ: f64 = 0.3819660112501051;
+// F(16) — the 16th Fibonacci number.
+// Genesis supply is on the Fibonacci sequence so the first expansion
+// lands on F(17) = 1597, and every subsequent expansion stays on the sequence.
 const GENESIS_CREDIT_SUPPLY: i64 = 987;
 
 
@@ -19,7 +22,11 @@ fn admission_allowance(honest_rep_fraction: f64, attestation_count: u64, next_th
         (attestation_count - prev) as f64 / (next_threshold - prev) as f64
     };
     let margin = honest_rep_fraction - INV_PHI;
-    (margin * 4.0 * cycle_progress).floor() as u32
+    // φ³ amplifies the margin above the φ⁻¹ honest threshold.
+    // Geometric choice — admission headroom compounds at the same
+    // rate as reputation itself.
+    const PHI_CU: f64 = 4.2360679774997896;
+    (margin * PHI_CU * cycle_progress).floor() as u32
 }
 
 fn expand_credit_supply(current: i64) -> i64 {
@@ -213,22 +220,21 @@ pub fn create_account(input: CreateAccountInput) -> ExternResult<ActionHash> {
                     // This window closes permanently when cycle 1 begins
                 }
                 _ => {
-                    // Governed phase — geometry enforces admission
-                    // Gate opens proportionally to validation work done
-                    // in current Fibonacci cycle
-                    // TODO: replace 1.0 with registry bridge call for real
-                    // honest_rep_fraction once that infrastructure exists
-                    let honest_rep_fraction = 1.0;
-                    let allowance = admission_allowance(
-                        honest_rep_fraction,
-                        state.attestation_count,
-                        state.next_fibonacci_threshold,
-                    );
-                    if allowance == 0 {
+                    // Governed phase — admission gate checks cycle progress.
+                    // honest_rep_fraction is enforced client-side before join
+                    // is attempted — it requires a live network view that the
+                    // joining agent's cells do not have at initialization time.
+                    let prev = previous_fibonacci(state.attestation_count);
+                    let cycle_progress = if state.next_fibonacci_threshold == prev {
+                        1.0
+                    } else {
+                        (state.attestation_count - prev) as f64
+                            / (state.next_fibonacci_threshold - prev) as f64
+                    };
+                    if cycle_progress <= 0.0 {
                         return Err(wasm_error!(WasmErrorInner::Guest(
-                            "Admission gate closed — network in governed phase, \
-                             no allowance available in current Fibonacci cycle. \
-                             Allowance opens as validators complete attestations.".to_string()
+                            "Admission gate closed — no validation work done \
+                             in current Fibonacci cycle.".to_string()
                         )));
                     }
                 }
@@ -382,6 +388,8 @@ fn signal_action(_action: SignedActionHashed) -> ExternResult<()> {
 // ─────────────────────────────────────────────
 
 const NETWORK_STATE_ANCHOR: &str = "network_state";
+// F(8) — the eighth Fibonacci number. First quorum threshold.
+// The network operates in genesis phase until 21 attestations are reached.
 const BOOTSTRAP_ATTESTATIONS: u64 = 21;
 
 fn get_network_state_anchor() -> ExternResult<EntryHash> {
@@ -452,22 +460,67 @@ pub fn on_attestation_created(_input: AttestationNotification) -> ExternResult<F
         None => BOOTSTRAP_ATTESTATIONS,
     };
 
-   
+    // Idempotency check — if a state entry with this attestation_count
+    // already exists, another agent wrote it first. Return their result
+    // rather than writing a duplicate. Concurrent writes from multiple
+    // validators calling check_quorum simultaneously are the expected case.
+    // Phase 5.5 replaces this with NetworkStateManifest through commit-reveal
+    // quorum, which makes state updates single-writer by design.
+    let all_state_links = fetch_links(
+        get_network_state_anchor()?,
+        LinkTypes::NetworkStateAnchor,
+    )?;
+    for link in &all_state_links {
+        if let Some(hash) = link.target.clone().into_action_hash() {
+            if let Some(record) = get(hash, GetOptions::default())? {
+                if let Some(entry) = record.entry().as_option() {
+                    if let Ok(existing) = NetworkState::try_from(entry) {
+                        if existing.attestation_count == attestation_count {
+                            // State for this count already written.
+                            // Detect if it diverges from what we would have written
+                            // and emit a signal if so — deviation visible on DHT.
+                            let would_cross = attestation_count >= current_threshold;
+                            let did_cross = existing.next_fibonacci_threshold > current_threshold;
+                            if would_cross != did_cross {
+                                // Divergence detected — the existing state disagrees
+                                // with what this agent would have written.
+                                // TODO Phase 5.5: emit deviation signal here.
+                                // For now, log and return the existing state's values.
+                                debug!("NetworkState divergence detected at count {}: \
+                                    existing threshold={}, expected={}",
+                                    attestation_count,
+                                    existing.next_fibonacci_threshold,
+                                    if would_cross { next_fibonacci(attestation_count) } else { current_threshold }
+                                );
+                            }
+                            return Ok(FibonacciResult {
+                                attestation_count: existing.attestation_count,
+                                threshold_crossed: did_cross,
+                                new_credit_supply: if did_cross { Some(existing.credit_supply) } else { None },
+                                admission_allowance: None,
+                                next_threshold: existing.next_fibonacci_threshold,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // No existing state for this count — we are first writer.
     if attestation_count >= current_threshold {
-        
         let new_supply = expand_credit_supply(credit_supply);
         let next_threshold = next_fibonacci(attestation_count);
 
-      
         let new_state = NetworkState {
             attestation_count,
             next_fibonacci_threshold: next_threshold,
             credit_supply: new_supply,
             cycle: cycle + 1,
-            phase: 1,  
+            // Phase 1 — governed phase begins after first Fibonacci crossing
+            phase: 1,
         };
         write_network_state(new_state)?;
-
 
         let honest_rep_fraction = INV_PHI;
         let allowance = admission_allowance(honest_rep_fraction, attestation_count, next_threshold);
@@ -480,11 +533,9 @@ pub fn on_attestation_created(_input: AttestationNotification) -> ExternResult<F
             next_threshold,
         })
     } else {
-       
-        let next_threshold = current_threshold;
         let new_state = NetworkState {
             attestation_count,
-            next_fibonacci_threshold: next_threshold,
+            next_fibonacci_threshold: current_threshold,
             credit_supply,
             cycle,
             phase: match current {
@@ -499,7 +550,7 @@ pub fn on_attestation_created(_input: AttestationNotification) -> ExternResult<F
             threshold_crossed: false,
             new_credit_supply: None,
             admission_allowance: None,
-            next_threshold,
+            next_threshold: current_threshold,
         })
     }
 }

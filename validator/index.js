@@ -8,7 +8,8 @@
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 
-const API           = process.env.TORIC_API    || process.env.POI_API    || 'http://localhost:3000';
+const BASE_URL = process.env.TORIC_API || process.env.POI_API || 'http://localhost:3000';
+const API = BASE_URL + '/v1';
 const AGENT         = process.env.TORIC_AGENT  || process.env.POI_AGENT  || '';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '30000');
 const DRY_RUN       = process.env.DRY_RUN === 'true';
@@ -380,10 +381,11 @@ async function processRequest(request, agent) {
 async function runValidationCycle(agent) {
   console.log('[' + new Date().toISOString() + '] checking for pending requests...');
   try {
-    const res = await fetch(`${API}/validation/pending/${agent}`);
-    const requests = await res.json();
+    const res = await fetch(`${API}/validation/pending`);
+    const raw = await res.json();
+    const requests = Array.isArray(raw) ? raw : [];
 
-    if (!requests || requests.length === 0) {
+    if (requests.length === 0) {
       console.log('  no pending requests');
       return;
     }
@@ -437,40 +439,41 @@ async function start() {
   subscribeToSignals(AGENT);
 
   // Fallback poll every 5 minutes — signals handle liveness
-  setInterval(() => runValidationCycle(AGENT), 300000);
+  setInterval(() => runValidationCycle(AGENT), 5000);
 }
 
 async function subscribeToSignals(agent) {
-  console.log('Subscribing to signal stream...');
-  const EventSourceModule = await import('eventsource');
-  const EventSource = EventSourceModule.default || EventSourceModule.EventSource || EventSourceModule;
-
-  function connect() {
-    const es = new EventSource(`${API}/signals`);
-
-    es.onmessage = async (event) => {
-      try {
-        const signal = JSON.parse(event.data);
-        const payload = signal?.value?.payload || signal;
-        if (payload?.type === 'ValidationRequested') {
-          console.log('[signal] ValidationRequested:', toBase64url(payload.request_hash));
-          await new Promise(r => setTimeout(r, 2000));
-          await runValidationCycle(agent);
+  async function connect() {
+    try {
+      const res = await fetch(`${BASE_URL}/signals`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      console.log('Signal stream connected');
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const signal = JSON.parse(line.slice(6));
+            const payload = signal?.value?.payload || signal;
+            if (payload?.type === 'ValidationRequested') {
+              console.log('[signal] ValidationRequested:', toBase64url(payload.request_hash));
+              await new Promise(r => setTimeout(r, 2000));
+              await runValidationCycle(agent);
+            }
+          } catch(e) {}
         }
-      } catch(e) {
-        console.log('signal parse error:', e.message);
       }
-    };
-
-    es.onerror = () => {
+    } catch(e) {
       console.log('Signal stream disconnected — reconnecting in 5s...');
-      es.close();
-      setTimeout(connect, 5000);
-    };
-
-    console.log('Signal stream connected');
+    }
+    setTimeout(connect, 5000);
   }
-
   connect();
 }
 

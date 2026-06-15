@@ -1,8 +1,32 @@
 use hdk::prelude::*;
 use coordination_integrity::*;
 
-const REVEAL_DEADLINE_US: i64 = 68_541_019;
+// Base network tick — minimum expected DHT round-trip in microseconds.
+// Conservative WAN estimate. Becomes a GeometryParam in Phase 5.5,
+// at which point the network observes its own round-trip times and
+// updates τ without a code change.
+const TAU_US: i64 = 10_000_000; // 10 seconds
+
+// Minimum validators required for quorum and reveal window.
+// F(4) — the fourth Fibonacci number. The minimum network that produces
+// a meaningful reputation-weighted quorum with a tiebreaker.
+// Becomes a GeometryParam in Phase 5.5.
 const MIN_VALIDATORS: usize = 3;
+
+// φ⁴ — used in reveal deadline and commit window threshold.
+const PHI_4: f64 = 6.8541019662496847;
+
+// Reveal deadline derived from geometry: φ⁴ × τ × MIN_VALIDATORS.
+// Scales with network tempo and quorum size.
+// A validator who slows the network to push others past the deadline
+// also extends the deadline proportionally — the attack closes itself.
+const REVEAL_DEADLINE_US: i64 = (PHI_4 * TAU_US as f64 * MIN_VALIDATORS as f64) as i64;
+
+// Negligibility threshold — φ⁻⁴. Upstream contributions below this
+// weight are not worth computing. Used to derive max recursion depth.
+const NEGLIGIBILITY_THRESHOLD: f64 = 0.14589803375031546;
+const PHI_SQ: f64     = 2.6180339887498948;
+const INV_PHI_SQ: f64 = 0.3819660112501051;
 
 #[hdk_extern]
 pub fn init(_: ()) -> ExternResult<InitCallbackResult> {
@@ -196,57 +220,6 @@ fn notify_mutual_credit(
     }
 }
 
-fn update_validator_credit(
-    agent: AgentPubKey,
-    registry_dna_hash: DnaHash,
-    mutual_credit_cell_id: CellId,
-) -> ExternResult<()> {
-    #[derive(Serialize, Deserialize, Debug)]
-    struct UpdateCreditLimitInput {
-        agent: AgentPubKey,
-        registry_dna_hash: DnaHash,
-    }
-
-    let result = call(
-        CallTargetCell::OtherCell(mutual_credit_cell_id),
-        ZomeName::from("mutual_credit"),
-        FunctionName::from("update_credit_limit"),
-        None,
-        UpdateCreditLimitInput { agent, registry_dna_hash },
-    )?;
-
-    match result {
-        ZomeCallResponse::Ok(_) => Ok(()),
-        _ => Ok(()),
-    }
-}
-
-fn record_convergence_signal(
-    agent: AgentPubKey,
-    agreed: bool,
-    request_hash: ActionHash,
-    registry_cell_id: CellId,
-) -> ExternResult<()> {
-    #[derive(Serialize, Deserialize, Debug)]
-    struct ConvergenceInput {
-        agent: AgentPubKey,
-        agreed: bool,
-        request_hash: ActionHash,
-    }
-
-    let result = call(
-        CallTargetCell::OtherCell(registry_cell_id),
-        ZomeName::from("registry"),
-        FunctionName::from("record_convergence"),
-        None,
-        ConvergenceInput { agent, agreed, request_hash },
-    )?;
-
-    match result {
-        ZomeCallResponse::Ok(_) => Ok(()),
-        _ => Ok(()),
-    }
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RecordEvidenceInput {
@@ -314,6 +287,16 @@ pub fn request_validation(input: RequestValidationInput) -> ExternResult<ActionH
 
     // Emit signal so validators can respond immediately
     // without waiting for next poll cycle
+    let global_path = Path::from("validation_requests.all");
+    let global_typed = global_path.typed(LinkTypes::GlobalValidationRequestAnchor)?;
+    global_typed.ensure()?;
+    create_link(
+        global_typed.path_entry_hash()?,
+        action_hash.clone(),
+        LinkTypes::GlobalValidationRequestAnchor,
+        (),
+    )?;
+
     emit_signal(Signal::ValidationRequested {
         request_hash: action_hash.clone(),
     })?;
@@ -390,8 +373,7 @@ pub fn commit_evaluation(input: CommitEvaluationInput) -> ExternResult<ActionHas
 
 #[hdk_extern]
 pub fn check_reveal_window(input: CheckQuorumInput) -> ExternResult<CommitmentStatus> {
-    const PHI_4: f64 = 6.8541019662496847;
-    const INV_PHI_SQ: f64 = 0.3819660112501051;  
+    // PHI_4 and INV_PHI_SQ from module-level geometry constants 
 
     let registry_cell_id = {
         let agent = agent_info()?.agent_initial_pubkey;
@@ -431,8 +413,7 @@ pub fn check_reveal_window(input: CheckQuorumInput) -> ExternResult<CommitmentSt
 
 #[hdk_extern]
 pub fn reveal_evaluation(input: RevealEvaluationInput) -> ExternResult<ActionHash> {
-    const INV_PHI_SQ: f64 = 0.3819660112501051;
-    const PHI_4: f64 = 6.8541019662496847;
+    // PHI_4 and INV_PHI_SQ from module-level geometry constants
 
     let agent = agent_info()?.agent_initial_pubkey;
 
@@ -493,35 +474,76 @@ pub fn reveal_evaluation(input: RevealEvaluationInput) -> ExternResult<ActionHas
     // Verify commitment hash matches reveal
     let commitment_link = my_commitment.unwrap();
     if let Some(commit_hash) = commitment_link.target.clone().into_action_hash() {
-        if let Some(record) = get(commit_hash, GetOptions::default())? {
-            if let Some(entry) = record.entry().as_option() {
-                if let Ok(commitment) = EvaluationCommitment::try_from(entry) {
-                    // Recompute hash from revealed values
-                    let preimage = format!(
-                        "{}:{}:{}:{}",
-                        input.passed,
-                        input.score,
-                        input.details.as_deref().unwrap_or(""),
-                        input.salt
-                    );
-                    let _computed = {
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        preimage.hash(&mut hasher);
-                        let h = hasher.finish();
-                        h.to_le_bytes().to_vec()
-                    };
+                if let Some(record) = get(commit_hash, GetOptions::default())? {
+                    if let Some(entry) = record.entry().as_option() {
+                        if let Ok(commitment) = EvaluationCommitment::try_from(entry) {
+                            use sha2::{Sha256, Digest};
 
-                    if commitment.commitment_hash.len() != 32 {
-                        return Err(wasm_error!(WasmErrorInner::Guest(
-                            "Invalid commitment hash length".to_string()
-                        )));
+                            // Recompute hash from revealed values.
+                            // Score normalized to 6 decimal places to match
+                            // validator client's toFixed(6) — prevents f64
+                            // string representation divergence between JS and Rust.
+                            let preimage = format!(
+                                "{}:{:.6}:{}:{}",
+                                input.passed,
+                                input.score,
+                                input.details.as_deref().unwrap_or(""),
+                                input.salt
+                            );
+                            let computed_hash = {
+                                let mut hasher = Sha256::new();
+                                hasher.update(preimage.as_bytes());
+                                hasher.finalize().to_vec()
+                            };
+
+                            if commitment.commitment_hash != computed_hash {
+                                // Record the mismatch as ValidationEvidence before rejecting.
+                                // Makes the violation permanent on the DHT and warrant-eligible.
+                                // The geometry then compounds the penalty through reputation.
+                                let evidence = ValidationEvidence {
+                                    manifest_hash: {
+                                        // Retrieve manifest hash from the original request
+                                        get(input.request_hash.clone(), GetOptions::default())?
+                                            .and_then(|r| r.entry().as_option().cloned())
+                                            .and_then(|e| ValidationRequest::try_from(&e).ok())
+                                            .map(|req| req.manifest_hash)
+                                            .unwrap_or(input.request_hash.clone())
+                                    },
+                                    evidence_type: "commitment_mismatch".to_string(),
+                                    expected: hex::encode(&commitment.commitment_hash),
+                                    actual: hex::encode(&computed_hash),
+                                    computed_severity: 1_000_000,
+                                    metadata_blob: {
+                                        let json = serde_json::json!({
+                                            "request_hash": input.request_hash,
+                                            "evaluator": agent,
+                                            "violation": "revealed values do not match commitment"
+                                        });
+                                        SerializedBytes::from(UnsafeBytes::from(
+                                            serde_json::to_vec(&json).unwrap_or_default()
+                                        ))
+                                    },
+                                };
+                                if let Ok(evidence_hash) = create_entry(
+                                    EntryTypes::ValidationEvidence(evidence)
+                                ) {
+                                    let _ = create_link(
+                                        input.request_hash.clone(),
+                                        evidence_hash,
+                                        LinkTypes::ManifestToEvidence,
+                                        (),
+                                    );
+                                }
+
+                                return Err(wasm_error!(WasmErrorInner::Guest(
+                                    "Commitment mismatch — revealed values do not match \
+                                     commitment. Violation recorded on DHT.".to_string()
+                                )));
+                            }
+                        }
                     }
                 }
             }
-        }
-    }
 
     // Commitment verified — write evaluation bundle
     let blob_bytes = {
@@ -563,8 +585,7 @@ pub fn reveal_evaluation(input: RevealEvaluationInput) -> ExternResult<ActionHas
 
 #[hdk_extern]
 pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
-    const INV_PHI_SQ: f64 = 0.3819660112501051;
-    const PHI_SQ: f64 = 2.6180339887498948;
+    // INV_PHI_SQ and PHI_SQ from module-level geometry constants
 
     let existing_quorum = {
         let query = LinkQuery::new(
@@ -739,24 +760,13 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
                     let mc_cell_id = CellId::new(input.mutual_credit_dna_hash.clone(), agent_info()?.agent_initial_pubkey);
                     notify_mutual_credit(att_hash, mc_cell_id.clone()).ok();
 
-                    // Update credit limits for all evaluators now that quorum is reached
-                    for eval in &evaluations {
-                        update_validator_credit(
-                            eval.evaluator.clone(),
-                            input.registry_dna_hash.clone(),
-                            CellId::new(input.mutual_credit_dna_hash.clone(), eval.evaluator.clone()),
-                        ).ok();
-
-                        // Record convergence signal — agreed with consensus or dissented
-                        // Nudges reputation in the direction of accuracy
-                        let agreed_with_consensus = eval.passed == (passing_weight >= quorum_threshold);
-                        record_convergence_signal(
-                            eval.evaluator.clone(),
-                            agreed_with_consensus,
-                            input.request_hash.clone(),
-                            CellId::new(input.registry_dna_hash.clone(), eval.evaluator.clone()),
-                        ).ok();
-                    }
+                    // Credit limit updates and convergence signals are pulled by each
+                    // validator's client after they observe quorum reached.
+                    // Push via bridge call is not used — cross-machine bridge calls
+                    // fail silently when the target cell is on a different conductor.
+                    // The pull model is reliable across machines and leaves a trace
+                    // when a validator fails to update — visible in total_commits/
+                    // total_reveals ratio over time.
                 }
             }
         }
@@ -803,6 +813,29 @@ pub fn get_pending_requests(agent: AgentPubKey) -> ExternResult<Vec<Record>> {
     for link in links {
         if let Some(action_hash) = link.target.into_action_hash() {
             if let Some(record) = get(action_hash, GetOptions::default())? {
+                records.push(record);
+            }
+        }
+    }
+    Ok(records)
+}
+
+#[hdk_extern]
+pub fn get_all_pending_requests(_: ()) -> ExternResult<Vec<Record>> {
+    let path = Path::from("validation_requests.all");
+    let typed = path.typed(LinkTypes::GlobalValidationRequestAnchor)?;
+    if !typed.exists()? {
+        return Ok(vec![]);
+    }
+    let links = fetch_links(typed.path_entry_hash()?, LinkTypes::GlobalValidationRequestAnchor)?;
+    let mut records = Vec::new();
+    for link in links {
+        if let Some(hash) = link.target.into_action_hash() {
+            let quorum_links = fetch_links(hash.clone(), LinkTypes::RequestToQuorum)?;
+            if !quorum_links.is_empty() {
+                continue;
+            }
+            if let Some(record) = get(hash, GetOptions::default())? {
                 records.push(record);
             }
         }

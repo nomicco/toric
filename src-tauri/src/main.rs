@@ -92,7 +92,7 @@ fn start_conductor(resource_dir: &PathBuf, data_dir: &PathBuf) -> Result<Child, 
 
     let bootstrap_url = std::env::var("BOOTSTRAP_URL")
         .unwrap_or_else(|_| option_env!("TORIC_BOOTSTRAP_URL")
-            .unwrap_or("http://192.168.1.45:8888")
+            .unwrap_or("http://192.168.1.169:8888")
             .to_string());
     let signal_url = std::env::var("SIGNAL_URL")
         .unwrap_or_else(|_| option_env!("TORIC_SIGNAL_URL")
@@ -217,6 +217,16 @@ fn main() {
                 eprintln!("Warning: {}", e);
             }
 
+            // Wait for lair socket before starting conductor
+            let lair_socket = data_dir.join("ks/socket");
+            let lair_start = std::time::Instant::now();
+            while !lair_socket.exists() {
+                if lair_start.elapsed().as_secs() >= 60 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+
             match start_conductor(&resource_dir, &data_dir) {
                 Ok(child) => {
                     state_setup.lock().unwrap().conductor = Some(child);
@@ -228,14 +238,24 @@ fn main() {
             }
 
             println!("Waiting for conductor...");
-            if !wait_for_conductor(120) {
+            if !wait_for_conductor(300) {
                 eprintln!("Conductor timed out after 120s");
                 std::process::exit(1);
             }
             println!("Conductor ready");
 
-            let rd = resource_dir.clone();
-            std::thread::spawn(move || install_happ(rd));
+            // Wait for conductor database to be ready
+            let db_path = data_dir.join("databases/conductor/conductor");
+            let db_start = std::time::Instant::now();
+            while !db_path.exists() {
+                if db_start.elapsed().as_secs() >= 120 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2000));
+
+            install_happ(resource_dir.clone());
 
             match start_api_server(&resource_dir) {
                 Ok(child) => {

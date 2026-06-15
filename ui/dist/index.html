@@ -520,6 +520,10 @@ body::before {
       <div class="nav-item" data-panel="browse">
         <i class="icon">◎</i> Browse
       </div>
+      <div class="nav-section">develop</div>
+      <div class="nav-item" data-panel="lab">
+        <i class="icon">◌</i> Lab
+      </div>
     </nav>
     <div class="sidebar-foot">
       <div style="color:var(--text3);font-size:9px;letter-spacing:0.1em;text-transform:uppercase">agent</div>
@@ -581,6 +585,28 @@ body::before {
       </div>
       <div class="panel-body" id="network-body">
         <div class="empty loading">loading</div>
+      </div>
+    </div>
+
+    <!-- Lab Panel -->
+    <div class="panel" id="panel-lab">
+      <div class="panel-header">
+        <div class="panel-title">lab</div>
+        <div class="panel-sub">register manifests · build provenance chains · observe trust score dimensions</div>
+      </div>
+      <div class="panel-body" id="lab-body">
+        <div id="lab-chain" style="padding:20px 24px;border-bottom:1px solid var(--border)">
+          <div style="font-size:9px;color:var(--text3);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:12px">provenance chain</div>
+          <div id="lab-chain-nodes" style="display:flex;flex-direction:column;gap:8px"></div>
+          <div style="margin-top:12px;display:flex;gap:8px">
+            <button id="lab-btn-base" onclick="Panels.lab.registerBase()" style="background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:11px;padding:6px 14px;cursor:pointer;letter-spacing:0.06em">+ base model</button>
+            <button id="lab-btn-deriv" onclick="Panels.lab.registerDerivative()" style="background:var(--bg3);border:1px solid var(--border2);color:var(--text2);font-family:var(--mono);font-size:11px;padding:6px 14px;cursor:pointer;letter-spacing:0.06em" disabled>+ derivative</button>
+            <button id="lab-btn-clear" onclick="Panels.lab.clear()" style="background:transparent;border:1px solid var(--border);color:var(--text3);font-family:var(--mono);font-size:11px;padding:6px 14px;cursor:pointer;letter-spacing:0.06em">clear</button>
+          </div>
+        </div>
+        <div id="lab-scores" style="padding:20px 24px"></div>
+        <div id="lab-queue" style="border-top:1px solid var(--border)"></div>
+        <div id="lab-log" style="padding:0 24px 20px;font-size:11px;color:var(--text3)"></div>
       </div>
     </div>
 
@@ -1264,6 +1290,251 @@ async function init() {
     } catch(e) {}
   }, 10000);
 }
+
+// ─── Lab Panel ───────────────────────────────────
+
+Panels.lab = {
+  chain: [],
+  queuePoller: null,
+
+  onActivate() { this.renderChain(); this.startQueuePoller(); },
+
+ log(msg, accent) {
+    const el = document.getElementById('lab-log');
+    const line = document.createElement('div');
+    line.style.cssText = `padding:3px 0;border-bottom:1px solid var(--border);color:${accent ? 'var(--accent)' : 'var(--text3)'}`;
+    line.textContent = `${new Date().toISOString().slice(11,19)}  ${msg}`;
+    el.prepend(line);
+  },
+
+  clear() {
+    this.chain = [];
+    document.getElementById('lab-chain-nodes').innerHTML = '';
+    document.getElementById('lab-scores').innerHTML = '';
+    document.getElementById('lab-log').innerHTML = '';
+    document.getElementById('lab-btn-deriv').disabled = true;
+  },
+
+  renderChain() {
+    const container = document.getElementById('lab-chain-nodes');
+    if (this.chain.length === 0) {
+      container.innerHTML = '<div style="color:var(--text3);font-size:11px">no manifests registered yet</div>';
+      return;
+    }
+    container.innerHTML = this.chain.map((node, i) => `
+      <div style="display:flex;align-items:center;gap:10px">
+        ${i > 0 ? '<div style="color:var(--text3);font-size:10px;margin-left:8px">↳</div>' : ''}
+        <div style="background:var(--bg3);border:1px solid var(--border2);padding:6px 12px;font-size:11px;flex:1;display:flex;align-items:center;justify-content:space-between">
+          <span style="color:var(--text2)">${node.label}</span>
+          <span class="hash" onclick="Panels.query.goHash('${node.hash}');Router.navigate('query')">${fmt.hash(node.hash)}</span>
+        </div>
+        <button onclick="Panels.lab.requestValidation('${node.hash}','${node.label}')"
+          style="background:transparent;border:1px solid var(--border2);color:var(--amber);font-family:var(--mono);font-size:10px;padding:4px 10px;cursor:pointer">
+          validate
+        </button>
+        <button onclick="Panels.lab.refreshScore('${node.hash}','${node.label}')"
+          style="background:transparent;border:1px solid var(--border2);color:var(--text3);font-family:var(--mono);font-size:10px;padding:4px 10px;cursor:pointer">
+          score
+        </button>
+      </div>
+    `).join('');
+  },
+
+  async registerBase() {
+    const btn = document.getElementById('lab-btn-base');
+    btn.textContent = 'registering...';
+    btn.disabled = true;
+    try {
+      const contentHash = 'sha256:' + Array.from(crypto.getRandomValues(new Uint8Array(16)))
+        .map(b => b.toString(16).padStart(2,'0')).join('');
+      const label = `base-${this.chain.length + 1}`;
+      const { hash } = await Api.post('/manifest', {
+        blob: {
+          blob_type: 'ai_model',
+          content_hash: contentHash,
+          architecture: 'llama',
+          parameter_count: 7000000000,
+          upstream_manifest_hashes: [],
+          connector_source: 'local',
+          version: '1.0.0',
+          description: `Lab base model ${this.chain.length + 1}`,
+          tags: [`lab:base`],
+        }
+      });
+      this.chain.push({ hash, label, type: 'base' });
+      this.renderChain();
+      document.getElementById('lab-btn-deriv').disabled = false;
+      this.log(`registered ${label}: ${fmt.hash(hash)}`, true);
+    } catch(e) {
+      this.log(`error: ${e.message}`);
+    } finally {
+      btn.textContent = '+ base model';
+      btn.disabled = false;
+    }
+  },
+
+  async registerDerivative() {
+    if (this.chain.length === 0) return;
+    const btn = document.getElementById('lab-btn-deriv');
+    btn.textContent = 'registering...';
+    btn.disabled = true;
+    try {
+      const upstream = this.chain[this.chain.length - 1];
+      const contentHash = 'sha256:' + Array.from(crypto.getRandomValues(new Uint8Array(16)))
+        .map(b => b.toString(16).padStart(2,'0')).join('');
+      const label = `deriv-${this.chain.length}`;
+      const { hash } = await Api.post('/manifest', {
+        blob: {
+          blob_type: 'ai_model',
+          content_hash: contentHash,
+          architecture: 'llama',
+          parameter_count: 7000000000,
+          upstream_manifest_hashes: [upstream.hash],
+          connector_source: 'local',
+          version: '1.0.0',
+          description: `Lab derivative of ${upstream.label}`,
+          tags: [`lab:derivative`, `upstream:${upstream.hash}`],
+        }
+      });
+      this.chain.push({ hash, label, type: 'derivative' });
+      this.renderChain();
+      this.log(`registered ${label}: ${fmt.hash(hash)} ← ${fmt.hash(upstream.hash)}`, true);
+    } catch(e) {
+      this.log(`error: ${e.message}`);
+    } finally {
+      btn.textContent = '+ derivative';
+      btn.disabled = false;
+    }
+  },
+
+  async requestValidation(hash, label) {
+    try {
+      const { hash: reqHash } = await Api.post('/validation/request', { manifest_hash: hash });
+      this.log(`validation requested for ${label}: ${fmt.hash(reqHash)}`, true);
+    } catch(e) {
+      this.log(`validation request error: ${e.message}`);
+    }
+  },
+
+  async refreshScore(hash, label) {
+    try {
+      const score = await Api.get(`/manifest/${hash}/trust-score`);
+      const attestations = await Api.get(`/manifest/${hash}/attestations`).catch(() => []);
+
+      let dimScores = { hash_score: null, provenance_score: null, static_score: null, probe_score: null };
+      if (attestations.length > 0) {
+        const latest = attestations[attestations.length - 1];
+        const e = latest.entry || {};
+        dimScores = {
+          hash_score:       e.hash_score       ?? null,
+          provenance_score: e.provenance_score ?? null,
+          static_score:     e.static_score     ?? null,
+          probe_score:      e.probe_score      ?? null,
+        };
+      }
+
+      const container = document.getElementById('lab-scores');
+      const existing = document.getElementById(`score-${hash}`);
+      const block = document.createElement('div');
+      block.id = `score-${hash}`;
+      block.style.cssText = 'margin-bottom:16px;border:1px solid var(--border);background:var(--bg2)';
+
+      const s = score.score ?? 0;
+      const pct = (s * 100).toFixed(1);
+      const scoreClass = passes(s) ? 'accent' : 'warn';
+
+      const dimRow = (name, val, weight) => {
+        const v = val !== null ? val.toFixed(4) : '—';
+        const pctVal = val !== null ? (val * 100).toFixed(1) : '0';
+        const color = val === null ? 'var(--text3)' : val >= 0.618 ? 'var(--accent)' : 'var(--warn)';
+        return `
+          <div style="display:grid;grid-template-columns:100px 1fr 60px;gap:8px;align-items:center;padding:6px 16px;border-bottom:1px solid var(--border)">
+            <div style="font-size:9px;color:var(--text3);letter-spacing:0.1em;text-transform:uppercase">${name} ${weight}</div>
+            <div style="height:2px;background:var(--bg3);position:relative">
+              <div style="height:100%;background:${color};width:${pctVal}%;transition:width 0.4s"></div>
+            </div>
+            <div style="font-size:11px;color:${color};text-align:right">${v}</div>
+          </div>`;
+      };
+
+      block.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border)">
+          <span style="font-size:11px;color:var(--text2);letter-spacing:0.08em">${label}</span>
+          <span style="font-size:18px;font-weight:300;color:var(--${scoreClass})">${fmt.score(s)}</span>
+        </div>
+        <div style="height:2px;background:var(--bg3);margin:0 16px;position:relative">
+          <div style="height:100%;background:var(--${scoreClass});width:${pct}%;transition:width 0.4s"></div>
+          <div style="position:absolute;top:-4px;left:61.8%;width:1px;height:10px;background:var(--text3)"></div>
+        </div>
+        ${dimRow('hash', dimScores.hash_score, 'φ⁻¹')}
+        ${dimRow('provenance', dimScores.provenance_score, 'φ⁻²')}
+        ${dimRow('static', dimScores.static_score, 'φ⁻³')}
+        ${dimRow('probe', dimScores.probe_score, 'φ⁻⁴')}
+        <div style="padding:8px 16px;font-size:10px;color:var(--text3)">${score.attestation_count} attestation${score.attestation_count !== 1 ? 's' : ''} · ${score.passes ? 'passes φ⁻¹' : 'below φ⁻¹'}</div>
+      `;
+
+      if (existing) existing.replaceWith(block);
+      else container.prepend(block);
+
+      this.log(`score refreshed for ${label}: ${fmt.score(s)}`);
+    } catch(e) {
+      this.log(`score error: ${e.message}`);
+    }
+  },
+
+  startQueuePoller() {
+    if (this.queuePoller) return;
+    this.queuePoller = setInterval(() => this.renderQueue(), 2000);
+    this.renderQueue();
+  },
+
+  stopQueuePoller() {
+    clearInterval(this.queuePoller);
+    this.queuePoller = null;
+  },
+
+  async renderQueue() {
+    const container = document.getElementById('lab-queue');
+    try {
+      const requests = await Api.get('/validation/pending');
+      if (!requests || requests.length === 0) {
+        container.innerHTML = '<div style="padding:12px 24px;font-size:11px;color:var(--text3);border-bottom:1px solid var(--border)">no pending validation requests</div>';
+        return;
+      }
+      container.innerHTML = `
+        <div style="padding:8px 24px 4px;font-size:9px;color:var(--text3);letter-spacing:0.15em;text-transform:uppercase;border-bottom:1px solid var(--border)">
+          pending validation requests (${requests.length})
+        </div>
+        ${requests.map(r => {
+          const reqHash = r.hash;
+          const manifestHash = r.entry?.manifest_hash || '—';
+          return `
+            <div style="display:flex;align-items:center;gap:12px;padding:8px 24px;border-bottom:1px solid var(--border);font-size:11px">
+              <div style="color:var(--text2);flex:1">${fmt.hash(reqHash)}</div>
+              <div style="color:var(--text3)">${fmt.hash(manifestHash)}</div>
+              <button onclick="Panels.lab.manualValidate('${reqHash}')"
+                style="background:transparent;border:1px solid var(--border2);color:var(--amber);font-family:var(--mono);font-size:10px;padding:4px 10px;cursor:pointer">
+                validate
+              </button>
+            </div>
+          `;
+        }).join('')}
+      `;
+    } catch(e) {
+      container.innerHTML = `<div style="padding:12px 24px;font-size:11px;color:var(--text3)">queue unavailable</div>`;
+    }
+  },
+
+  async manualValidate(requestHash) {
+    this.log(`manual validation triggered: ${fmt.hash(requestHash)}`, true);
+    try {
+      await Api.post('/debug/attest/' + requestHash, {});
+      this.log(`attestation submitted for ${fmt.hash(requestHash)}`, true);
+    } catch(e) {
+      this.log(`validation error: ${e.message}`);
+    }
+  },
+};
 
 Panels.browse = {
   loaded: false,

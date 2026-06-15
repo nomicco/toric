@@ -66,6 +66,7 @@ pub enum LinkTypes {
     AgentToRequest,
     ManifestToRequest,
     ManifestToEvidence,
+    GlobalValidationRequestAnchor,
 }
 
 #[hdk_extern]
@@ -235,6 +236,8 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
                 Ok(ValidateCallbackResult::Valid),
             LinkTypes::ManifestToEvidence =>
                 validate_create_link_manifest_to_evidence(action, base_address, target_address, tag),
+            LinkTypes::GlobalValidationRequestAnchor =>
+                Ok(ValidateCallbackResult::Valid),
         },
 
         FlatOp::RegisterDeleteLink { .. } =>
@@ -286,6 +289,8 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
                 Ok(ValidateCallbackResult::Valid),
             LinkTypes::ManifestToEvidence =>
                 validate_create_link_manifest_to_evidence(action, base_address, target_address, tag),
+            LinkTypes::GlobalValidationRequestAnchor =>
+                Ok(ValidateCallbackResult::Valid),
         },
 
         FlatOp::StoreRecord(OpRecord::DeleteLink { .. }) =>

@@ -54,7 +54,7 @@ function queueQuorumCheck(request_hash) {
 }
 
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || "44121");
-const APP_PORT   = parseInt(process.env.APP_PORT   || "37351");
+const APP_PORT   = parseInt(process.env.APP_PORT   || "44122");
 const API_PORT   = parseInt(process.env.API_PORT   || "3000");
 const APP_ID     = process.env.APP_ID || "toric";
 
@@ -212,7 +212,11 @@ app.get("/signals", (req, res) => {
   res.setHeader("Connection",    "keep-alive");
   res.flushHeaders();
   sseClients.add(res);
-  req.on("close", () => sseClients.delete(res));
+  const keepalive = setInterval(() => res.write(': keepalive\n\n'), 15000);
+  req.on("close", () => {
+    clearInterval(keepalive);
+    sseClients.delete(res);
+  });
 });
 
 function broadcastSignal(signal) {
@@ -275,6 +279,11 @@ v1.post("/manifest", async (req, res) => {
   try {
     const { blob } = req.body;
     if (!blob) return res.status(400).json({ error: "blob required" });
+    if (blob.upstream_manifest_hashes && blob.upstream_manifest_hashes.length > 0) {
+      blob.upstream_manifest_hashes = blob.upstream_manifest_hashes.map(h =>
+        typeof h === 'string' ? Buffer.from(h, 'base64url') : h
+      );
+    }
     const hash = await registryCall("create_manifest", { blob });
     res.status(201).json({ hash: toBase64(hash) });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -517,6 +526,13 @@ v1.get("/dna-hashes", async (req, res) => {
 // ─────────────────────────────────────────────
 // v1 — Validation
 // ─────────────────────────────────────────────
+
+v1.get("/validation/pending", async (req, res) => {
+  try {
+    const requests = await coordinationCall("get_all_pending_requests", null);
+    res.json(requests || []);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 v1.get("/validation/pending/:pubkey", async (req, res) => {
   try {

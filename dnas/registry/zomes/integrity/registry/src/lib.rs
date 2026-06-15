@@ -35,6 +35,8 @@ pub struct ReputationCache {
     pub computed_at: Timestamp,
     pub attestation_count: u32,
     pub warrant_count: u32,
+    pub total_commits: u32,
+    pub total_reveals: u32,
 }
 
 #[hdk_entry_helper]
