@@ -1,59 +1,55 @@
-# Poi
+# Toric
+
+A decentralized AI model trust and validation network built on Holochain. Toric attests to the integrity of AI model manifests through agent-staked commit-reveal quorum, weighted by demonstrated validation history, producing trust scores that are permanent, auditable, and traversable by provenance.
+
+## Architecture
+
+Four DNAs:
+- **registry** — manifests, attestations, warrants, trust/reputation scoring
+- **coordination** — commit-reveal validation protocol, quorum logic, evidence
+- **mutual_credit** — balances, credit limits, Fibonacci expansion, network state
+- **identity** — agent manifests, capability indexing
+
+Plus a Node.js validator client (connects directly to a local conductor), an Express API (serves the UI), and a Tauri desktop wrapper.
 
 ## Environment Setup
 
-> PREREQUISITE: set up the [holochain development environment](https://developer.holochain.org/docs/install/).
+> PREREQUISITE: set up the [Holochain development environment](https://developer.holochain.org/docs/install/).
 
-Enter the nix shell by running this in the root folder of the repository: 
+Enter the nix shell from the project root:
 
 ```bash
 nix develop
 npm install
 ```
 
-**Run all the other instructions in this README from inside this nix shell, otherwise they won't work**.
+Run all other commands from inside this nix shell.
 
-## Running 2 agents
- 
-```bash
-npm run start
-```
-
-This will create a network of 2 nodes connected to each other and their respective UIs.
-It will also bring up the Holochain Playground for advanced introspection of the conductors.
-
-## Running the backend tests
+## Development
 
 ```bash
-npm run test
+./dev.sh
 ```
 
-## Bootstrapping a network
+Starts the conductor, API, and validator for local development.
 
-Create a custom network of nodes connected to each other and their respective UIs with:
+## Validator
+
+Each validator connects directly to its own local conductor — no intermediary required.
 
 ```bash
-AGENTS=3 npm run network
+TORIC_AGENT=<your-agent-pubkey> node validator/index.js
 ```
-
-Substitute the "3" for the number of nodes that you want to bootstrap in your network.
-This will also bring up the Holochain Playground for advanced introspection of the conductors.
 
 ## Packaging
 
-To package the web happ:
-``` bash
+```bash
 npm run package
 ```
 
-You'll have the `poi.webhapp` in `workdir`. This is what you should distribute so that the Holochain Launcher can install it.
-You will also have its subcomponent `poi.happ` in the same folder`.
+Produces `toric.webhapp` in `workdir/` for distribution via the Holochain Launcher.
 
 ## Documentation
 
-This repository is using these tools:
-- [NPM Workspaces](https://docs.npmjs.com/cli/v7/using-npm/workspaces/): npm v7's built-in monorepo capabilities.
-- [hc](https://github.com/holochain/holochain/tree/develop/crates/hc): Holochain CLI to easily manage Holochain development instances.
-- [@holochain/tryorama](https://www.npmjs.com/package/@holochain/tryorama): test framework.
-- [@holochain/client](https://www.npmjs.com/package/@holochain/client): client library to connect to Holochain from the UI.
-- [hc playground](https://github.com/darksoil-studio/holochain-playground): introspection tooling to understand what's going on in the Holochain nodes.
+- [`@holochain/client`](https://www.npmjs.com/package/@holochain/client) — client library used by the validator and API
+- [`hc`](https://github.com/holochain/holochain/tree/develop/crates/hc) — Holochain CLI
