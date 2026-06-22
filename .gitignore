@@ -25,7 +25,12 @@
 .running
 .hc
 
-echo "src-tauri/holochain-bin" >> .gitignore
-echo "src-tauri/holochain-nix-closure.tar.gz" >> .gitignore
+# large binaries — never commit these
+holochain-bin
+holochain-nix-closure.tar.gz
+holochain-nix-closure-full.tar.gz
+src-tauri/holochain-bin
+src-tauri/holochain-nix-closure.tar.gz
+*.tar.gz
 
 /data/
