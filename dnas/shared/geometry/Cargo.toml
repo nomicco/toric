@@ -1,0 +1,9 @@
+[package]
+name = "toric-geometry"
+version = "0.1.0"
+edition = "2021"
+
+# No HDI or HDK dependency — pure Rust.
+# Safe to use from any coordinator or integrity zome.
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }

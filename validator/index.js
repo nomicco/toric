@@ -7,6 +7,7 @@
 
 import fetch from 'node-fetch';
 import crypto from 'crypto';
+import { AppWebsocket, AdminWebsocket } from '@holochain/client';
 
 const BASE_URL = process.env.TORIC_API || process.env.POI_API || 'http://localhost:3000';
 const API = BASE_URL + '/v1';
@@ -35,13 +36,48 @@ const INTER_REQUEST_DELAY_MS  = Math.round(TAU_MS / PHI_4);   // ~1459ms
 const REVEAL_DEADLINE_MS      = PHI_4 * TAU_MS * MIN_VALIDATORS; // mirrors Rust
 const REVEAL_POLL_ATTEMPTS    = Math.ceil(REVEAL_DEADLINE_MS / REVEAL_POLL_INTERVAL_MS);
 
+const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '44121');
+const APP_PORT   = parseInt(process.env.APP_PORT   || '44122');
+const APP_ID     = process.env.APP_ID || 'toric';
+
 console.log('Toric Validator Client v2');
 console.log('API:', API);
 console.log('Agent:', AGENT || '(not set)');
-console.log('Poll interval:', POLL_INTERVAL + 'ms');
+console.log('Poll interval:', POLL_INTERVAL_MS + 'ms');
 console.log('Dry run:', DRY_RUN);
 console.log('HF token:', HF_TOKEN ? 'set' : 'not set (public models only)');
 console.log('');
+
+
+async function connectConductor() {
+  const adminWs = await AdminWebsocket.connect({
+    url: new URL(`ws://localhost:${ADMIN_PORT}`),
+    wsClientOptions: { origin: 'http://localhost' },
+  });
+
+  const issued = await adminWs.issueAppAuthenticationToken({
+    installed_app_id: APP_ID,
+  });
+
+  const appInfo = await adminWs.listApps({ status_filter: 'enabled' });
+  const app = appInfo.find(a => a.installed_app_id === APP_ID);
+  const registryCell  = app.cell_info['registry'][0].value;
+  const mcCell        = app.cell_info['mutual_credit'][0].value;
+
+  const appWs = await AppWebsocket.connect({
+    url: new URL(`ws://localhost:${APP_PORT}`),
+    token: issued.token,
+    wsClientOptions: { origin: 'http://localhost' },
+  });
+
+  await adminWs.authorizeSigningCredentials(registryCell.cell_id);
+  await adminWs.authorizeSigningCredentials(mcCell.cell_id);
+  await adminWs.client.close();
+
+  return { appWs, registryCell, mcCell };
+}
+
+
 
 function toBase64url(hash) {
   if (!hash) return 'unknown';
@@ -468,46 +504,45 @@ async function processRequest(request, agent) {
 
   if (!quorumReached || DRY_RUN) return;
 
-  // Pull credit limit update for this validator
-  // Each validator pulls their own — no cross-machine push needed
+  // Pull credit limit update — direct local zome call
   try {
-    const agentRes = await fetch(`${API}/agent/me`);
-    const agentData = await agentRes.json();
-    const myPubkey = agentData.agent;
+    const { appWs, registryCell, mcCell } = conductorClient;
+    const appInfo = await appWs.appInfo();
+    const registryDnaHash = registryCell.cell_id[0];
+    const agentPubKey = registryCell.cell_id[1];
 
-    const creditRes = await fetch(`${API}/agent/${myPubkey}/credit-update`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const hash = await appWs.callZome({
+      cell_id: mcCell.cell_id,
+      zome_name: 'mutual_credit',
+      fn_name: 'update_credit_limit',
+      payload: {
+        agent: agentPubKey,
+        registry_dna_hash: registryDnaHash,
+      },
+      provenance: mcCell.cell_id[1],
     });
-    const creditData = await creditRes.json();
-    if (creditData.hash) {
-      console.log('  credit limit updated:', creditData.hash.slice(0, 20) + '...');
-    } else {
-      console.log('  credit update skipped:', creditData.error || 'no change');
-    }
+    console.log('  credit limit updated:', Buffer.from(hash).toString('base64url').slice(0, 20) + '...');
   } catch(e) {
     console.log('  credit update error:', e.message);
   }
 
-  // Record convergence signal for this validator
-  // Each validator records their own — no cross-machine push needed
+  // Record convergence signal — direct local zome call
   try {
-    const agentRes = await fetch(`${API}/agent/me`);
-    const agentData = await agentRes.json();
-    const myPubkey = agentData.agent;
+    const { appWs, registryCell } = conductorClient;
+    const agentPubKey = registryCell.cell_id[1];
 
-    const convRes = await fetch(`${API}/agent/${myPubkey}/convergence`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const hash = await appWs.callZome({
+      cell_id: registryCell.cell_id,
+      zome_name: 'registry',
+      fn_name: 'record_convergence',
+      payload: {
+        agent: agentPubKey,
         agreed: agreedWithConsensus,
-        request_hash: requestHash,
-      }),
+        request_hash: Buffer.from(requestHash, 'base64url'),
+      },
+      provenance: registryCell.cell_id[1],
     });
-    const convData = await convRes.json();
-    if (convData.hash) {
-      console.log('  convergence recorded:', agreedWithConsensus ? 'agreed ✓' : 'dissented');
-    }
+    console.log('  convergence recorded:', agreedWithConsensus ? 'agreed ✓' : 'dissented');
   } catch(e) {
     console.log('  convergence error:', e.message);
   }
@@ -539,6 +574,8 @@ async function runValidationCycle(agent) {
   }
 }
 
+let conductorClient = null;
+
 async function start() {
   if (!AGENT) {
     console.error('TORIC_AGENT environment variable required.');
@@ -547,6 +584,8 @@ async function start() {
 
   console.log('Starting validator for agent:', AGENT);
   console.log('');
+
+  conductorClient = await connectConductor();
 
 // Register agent identity on startup
   try {

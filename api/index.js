@@ -280,36 +280,6 @@ v1.get("/agent/:pubkey/attestations", async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Pull-based credit limit update — called by each validator after quorum
-v1.post("/agent/:pubkey/credit-update", async (req, res) => {
-  try {
-    const { registryDnaHash } = await getDnaHashes();
-    const hash = await mutualCreditCall("update_credit_limit", {
-      agent: Buffer.from(req.params.pubkey, "base64url"),
-      registry_dna_hash: registryDnaHash,
-    });
-    res.json({ hash: toBase64(hash) });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Pull-based convergence signal — called by each validator after quorum
-v1.post("/agent/:pubkey/convergence", async (req, res) => {
-  try {
-    const { agreed, request_hash } = req.body;
-    if (agreed === undefined || !request_hash)
-      return res.status(400).json({ error: "agreed and request_hash required" });
-    const agentInfo = await appWs.appInfo();
-    const cell = agentInfo.cell_info["registry"][0].value;
-    const myPubkey = toBase64(cell.cell_id[1]);
-    const hash = await registryCall("record_convergence", {
-      agent: Buffer.from(req.params.pubkey, "base64url"),
-      agreed,
-      request_hash: Buffer.from(request_hash, "base64url"),
-    });
-    res.json({ hash: toBase64(hash) });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
 // ─────────────────────────────────────────────
 // v1 — Manifests
 // ─────────────────────────────────────────────
@@ -550,6 +520,20 @@ v1.get("/network/state", async (req, res) => {
   try {
     const state = await mutualCreditCall("get_network_state", null);
     res.json(state || { attestation_count: 0, next_fibonacci_threshold: 21, credit_supply: 987, cycle: 0, phase: 0 });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+v1.get("/network/reputation", async (req, res) => {
+  try {
+    const result = await registryCall("get_network_reputation", null);
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+v1.get('/network/reputation', async (req, res) => {
+  try {
+    const result = await registryCall('get_network_reputation', null);
+    res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

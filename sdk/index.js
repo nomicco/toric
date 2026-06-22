@@ -136,6 +136,38 @@ export class Toric {
     return this.#get('/status');
   }
 
+/**
+ * Check whether the network's health allows a new agent to join.
+ * Call this before initiating the join sequence.
+ * Returns { allowed: bool, honest_rep_fraction: float, reason: string }
+ */
+async canJoin() {
+  const [networkState, reputation] = await Promise.all([
+    this.#get('/network/state'),
+    this.#get('/network/reputation'),
+  ]);
+
+  // Genesis phase — always open
+  if (!networkState || networkState.phase === 0) {
+    return { allowed: true, honest_rep_fraction: 1.0, reason: 'genesis' };
+  }
+
+  const fraction = reputation.honest_rep_fraction ?? 1.0;
+
+  // φ⁻¹ is the honest threshold — same constant used throughout Toric's geometry
+  const INV_PHI = 0.6180339887498948;
+  if (fraction <= INV_PHI) {
+    return {
+      allowed: false,
+      honest_rep_fraction: fraction,
+      reason: `Network honesty below φ⁻¹ threshold (${fraction.toFixed(4)} ≤ ${INV_PHI})`,
+    };
+  }
+
+  return { allowed: true, honest_rep_fraction: fraction, reason: 'ok' };
+}
+
+
   // ─────────────────────────────────────────────
   // Models
   // ─────────────────────────────────────────────
@@ -469,6 +501,36 @@ export class Toric {
     return this.#get('/network/state');
   }
 
+/**
+   * Check whether the network's health allows a new agent to join.
+   * Call this before initiating the join sequence.
+   * Returns { allowed: bool, honest_rep_fraction: float, reason: string }
+   */
+  async canJoin() {
+    const [networkState, reputation] = await Promise.all([
+      this.#get('/network/state'),
+      this.#get('/network/reputation'),
+    ]);
+
+    // Genesis phase — always open
+    if (!networkState || networkState.phase === 0) {
+      return { allowed: true, honest_rep_fraction: 1.0, reason: 'genesis' };
+    }
+
+    const fraction = reputation.honest_rep_fraction ?? 1.0;
+    const INV_PHI = 0.6180339887498948;
+
+    if (fraction <= INV_PHI) {
+      return {
+        allowed: false,
+        honest_rep_fraction: fraction,
+        reason: `Network honesty below φ⁻¹ threshold (${fraction.toFixed(4)} ≤ ${INV_PHI})`,
+      };
+    }
+
+    return { allowed: true, honest_rep_fraction: fraction, reason: 'ok' };
+  }
+
   /**
    * Get the φ-weighted trust score for a manifest.
    * Includes direct attestations, upstream provenance, convergence, and warrant penalties.
@@ -552,5 +614,6 @@ export async function hashDirectory(dirPath) {
   }
   return hash.digest('hex');
 }
+
 
 export default Toric;

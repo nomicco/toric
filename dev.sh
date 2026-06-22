@@ -37,8 +37,8 @@ npm run start 2>&1 | while IFS= read -r line; do
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
-    ADMIN_PORT=$ADMIN0 APP_PORT=$APP0 API_PORT=3000 node api/index.js &
-    ADMIN_PORT=$ADMIN1 APP_PORT=$APP1 API_PORT=3001 node api/index.js &
+    ADMIN_PORT=$ADMIN0 APP_PORT=$APP0 API_PORT=3000 APP_ID=toric node api/index.js &
+    ADMIN_PORT=$ADMIN1 APP_PORT=$APP1 API_PORT=3001 APP_ID=toric node api/index.js &
 
     # Reset so we don't launch again
     ADMIN0=""
