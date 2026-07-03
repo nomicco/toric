@@ -1,0 +1,29 @@
+manifest_version: '0'
+name: ledger
+integrity:
+  network_seed: null
+  # PRODUCTION: set progenitor before launch —
+  # properties: { progenitor: "uhCAk..." }
+  # mutual_credit_integrity gates the first roster declaration to it.
+  properties: null
+  zomes:
+  - name: registry_integrity
+    hash: null
+    path: ../../../target/wasm32-unknown-unknown/release/registry_integrity.wasm
+    dependencies: null
+  - name: mutual_credit_integrity
+    hash: null
+    path: ../../../target/wasm32-unknown-unknown/release/mutual_credit_integrity.wasm
+    dependencies: null
+coordinator:
+  zomes:
+  - name: registry
+    hash: null
+    path: ../../../target/wasm32-unknown-unknown/release/registry.wasm
+    dependencies:
+    - name: registry_integrity
+  - name: mutual_credit
+    hash: null
+    path: ../../../target/wasm32-unknown-unknown/release/mutual_credit.wasm
+    dependencies:
+    - name: mutual_credit_integrity
