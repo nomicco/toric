@@ -29,14 +29,11 @@ async function processQuorumQueue() {
     const { request_hash, resolve } = quorumQueue.shift();
     try {
       const appInfo = await appWs.appInfo();
-      const rawReg = appInfo.cell_info["registry"][0].value.cell_id[0];
-      const registryDnaHash = rawReg.type === "Buffer" ? Buffer.from(rawReg.data) : Buffer.from(rawReg);
-      const rawMC = appInfo.cell_info["mutual_credit"][0].value.cell_id[0];
-      const mutualCreditDnaHash = rawMC.type === "Buffer" ? Buffer.from(rawMC.data) : Buffer.from(rawMC);
+      const rawLedger = appInfo.cell_info["ledger"][0].value.cell_id[0];
+      const ledgerDnaHash = rawLedger.type === "Buffer" ? Buffer.from(rawLedger.data) : Buffer.from(rawLedger);
       const qResult = await coordinationCall("check_quorum", {
         request_hash: Buffer.from(request_hash, "base64url"),
-        registry_dna_hash: registryDnaHash,
-        mutual_credit_dna_hash: mutualCreditDnaHash,
+        ledger_dna_hash: ledgerDnaHash,
       });
       resolve(qResult);
     } catch(e) {
@@ -81,7 +78,7 @@ async function connect() {
     const poiApp = appInfo.find(a => a.installed_app_id === APP_ID);
     if (!poiApp) throw new Error(`App ${APP_ID} not found or not running`);
 
-    const registryCell = poiApp.cell_info["registry"][0].value;
+    const registryCell = poiApp.cell_info["ledger"][0].value;
     cellId = registryCell.cell_id;
 
     const allCells = [];
@@ -183,7 +180,7 @@ async function identityCall(fnName, payload) {
 async function mutualCreditCall(fnName, payload) {
   if (!appWs) throw new Error("Not connected to conductor");
   const appInfo = await appWs.appInfo();
-  const cell = appInfo.cell_info["mutual_credit"][0].value;
+  const cell = appInfo.cell_info["ledger"][0].value;
   return appWs.callZome({
     cell_id:    cell.cell_id,
     zome_name:  "mutual_credit",
@@ -195,13 +192,11 @@ async function mutualCreditCall(fnName, payload) {
 
 async function getDnaHashes() {
   const appInfo = await appWs.appInfo();
-  const rawReg  = appInfo.cell_info["registry"][0].value.cell_id[0];
-  const rawMC   = appInfo.cell_info["mutual_credit"][0].value.cell_id[0];
-  const rawCoord = appInfo.cell_info["coordination"][0].value.cell_id[0];
+  const rawLedger = appInfo.cell_info["ledger"][0].value.cell_id[0];
+  const rawCoord  = appInfo.cell_info["coordination"][0].value.cell_id[0];
   return {
-    registryDnaHash:     rawReg.type  === "Buffer" ? Buffer.from(rawReg.data)   : Buffer.from(rawReg),
-    mutualCreditDnaHash: rawMC.type   === "Buffer" ? Buffer.from(rawMC.data)    : Buffer.from(rawMC),
-    coordDnaHash:        rawCoord.type === "Buffer" ? Buffer.from(rawCoord.data) : Buffer.from(rawCoord),
+    ledgerDnaHash: rawLedger.type === "Buffer" ? Buffer.from(rawLedger.data) : Buffer.from(rawLedger),
+    coordDnaHash:  rawCoord.type  === "Buffer" ? Buffer.from(rawCoord.data)  : Buffer.from(rawCoord),
   };
 }
 
@@ -250,7 +245,7 @@ v1.get("/status", (req, res) => {
 v1.get("/agent/me", async (req, res) => {
   try {
     const info = await appWs.appInfo();
-    const cell = info.cell_info["registry"][0].value;
+    const cell = info.cell_info["ledger"][0].value;
     res.json({ agent: toBase64(cell.cell_id[1]) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -516,6 +511,29 @@ v1.post("/warrant/:hash/confirm", async (req, res) => {
 // v1 — Network
 // ─────────────────────────────────────────────
 
+v1.get("/network/closure", async (req, res) => {
+  try {
+    const result = await registryCall("get_latest_closure", null);
+    res.json(result || null);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+v1.get("/economy/snapshot", async (req, res) => {
+  try {
+    const snap = await mutualCreditCall("economic_snapshot", null);
+    res.json(snap);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+v1.get("/economy/balance/:pubkey", async (req, res) => {
+  try {
+    const result = await mutualCreditCall("get_balance", {
+      agent: Buffer.from(req.params.pubkey, "base64url"),
+    });
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 v1.get("/network/state", async (req, res) => {
   try {
     const state = await mutualCreditCall("get_network_state", null);
@@ -530,26 +548,18 @@ v1.get("/network/reputation", async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-v1.get('/network/reputation', async (req, res) => {
-  try {
-    const result = await registryCall('get_network_reputation', null);
-    res.json(result);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
 v1.get("/dna-hashes", async (req, res) => {
   try {
-    const { registryDnaHash, mutualCreditDnaHash, coordDnaHash } = await getDnaHashes();
+    const { ledgerDnaHash, coordDnaHash } = await getDnaHashes();
     const appInfo = await appWs.appInfo();
     const rawId = appInfo.cell_info["identity"]?.[0]?.value?.cell_id?.[0];
     const identityDnaHash = rawId
       ? (rawId.type === "Buffer" ? Buffer.from(rawId.data) : Buffer.from(rawId))
       : null;
     res.json({
-      registry:      toBase64(registryDnaHash),
-      mutual_credit: toBase64(mutualCreditDnaHash),
-      coordination:  toBase64(coordDnaHash),
-      identity:      toBase64(identityDnaHash),
+      ledger:       toBase64(ledgerDnaHash),
+      coordination: toBase64(coordDnaHash),
+      identity:     toBase64(identityDnaHash),
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -597,11 +607,10 @@ v1.post("/validation/evaluate", async (req, res) => {
     console.log("evaluation submitted:", toBase64(hash).slice(0, 20) + "...");
     await new Promise(r => setTimeout(r, POST_SUBMIT_WAIT_MS));
     try {
-      const { registryDnaHash, mutualCreditDnaHash } = await getDnaHashes();
+      const { ledgerDnaHash } = await getDnaHashes();
       const qResult = await coordinationCall("check_quorum", {
         request_hash:         Buffer.from(request_hash, "base64url"),
-        registry_dna_hash:    registryDnaHash,
-        mutual_credit_dna_hash: mutualCreditDnaHash,
+        ledger_dna_hash: ledgerDnaHash,
       });
       console.log("quorum check:", qResult.reached ? "REACHED ✓" : "not yet",
         "(" + qResult.evaluation_count + " evals, weight " + qResult.combined_weight?.toFixed(3) + ")");
@@ -628,21 +637,20 @@ v1.post("/validation/reveal", async (req, res) => {
     const { request_hash, passed, score, details, salt } = req.body;
     if (!request_hash || !salt)
       return res.status(400).json({ error: "request_hash and salt required" });
-    const { registryDnaHash, mutualCreditDnaHash } = await getDnaHashes();
+    const { ledgerDnaHash } = await getDnaHashes();
     const hash = await coordinationCall("reveal_evaluation", {
       request_hash: Buffer.from(request_hash, "base64url"),
       passed: passed || false,
       score:  score  || 0.0,
       details: details || null,
       salt,
-      registry_dna_hash: registryDnaHash,
+      ledger_dna_hash: ledgerDnaHash,
     });
     await new Promise(r => setTimeout(r, 2000));
     try {
       const qResult = await coordinationCall("check_quorum", {
         request_hash:           Buffer.from(request_hash, "base64url"),
-        registry_dna_hash:      registryDnaHash,
-        mutual_credit_dna_hash: mutualCreditDnaHash,
+        ledger_dna_hash: ledgerDnaHash,
       });
       console.log("quorum check:", qResult.reached ? "REACHED ✓" : "not yet",
         "(" + qResult.evaluation_count + " evals, weight " + qResult.combined_weight?.toFixed(3) + ")");
@@ -653,11 +661,10 @@ v1.post("/validation/reveal", async (req, res) => {
 
 v1.post("/validation/reveal-window", async (req, res) => {
   try {
-    const { registryDnaHash, mutualCreditDnaHash } = await getDnaHashes();
+    const { ledgerDnaHash } = await getDnaHashes();
     const result = await coordinationCall("check_reveal_window", {
       request_hash:           Buffer.from(req.body.request_hash, "base64url"),
-      registry_dna_hash:      registryDnaHash,
-      mutual_credit_dna_hash: mutualCreditDnaHash,
+      ledger_dna_hash: ledgerDnaHash,
     });
     res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -665,11 +672,10 @@ v1.post("/validation/reveal-window", async (req, res) => {
 
 v1.post("/validation/quorum", async (req, res) => {
   try {
-    const { registryDnaHash, mutualCreditDnaHash } = await getDnaHashes();
+    const { ledgerDnaHash } = await getDnaHashes();
     const result = await coordinationCall("check_quorum", {
       request_hash:           Buffer.from(req.body.request_hash, "base64url"),
-      registry_dna_hash:      registryDnaHash,
-      mutual_credit_dna_hash: mutualCreditDnaHash,
+      ledger_dna_hash: ledgerDnaHash,
     });
     res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }

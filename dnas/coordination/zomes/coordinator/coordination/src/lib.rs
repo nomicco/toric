@@ -1,5 +1,9 @@
 use hdk::prelude::*;
 use coordination_integrity::*;
+use toric_geometry::{
+    PHI_4, PHI_SQ, INV_PHI_SQ,
+    // Used in Phase 5.5 — NetworkStateManifest drift threshold check in check_quorum.
+};
 
 // Base network tick — minimum expected DHT round-trip in microseconds.
 // Conservative WAN estimate. Becomes a GeometryParam in Phase 5.5,
@@ -13,20 +17,12 @@ const TAU_US: i64 = 10_000_000; // 10 seconds
 // Becomes a GeometryParam in Phase 5.5.
 const MIN_VALIDATORS: usize = 3;
 
-// φ⁴ — used in reveal deadline and commit window threshold.
-const PHI_4: f64 = 6.8541019662496847;
-
 // Reveal deadline derived from geometry: φ⁴ × τ × MIN_VALIDATORS.
 // Scales with network tempo and quorum size.
 // A validator who slows the network to push others past the deadline
 // also extends the deadline proportionally — the attack closes itself.
 const REVEAL_DEADLINE_US: i64 = (PHI_4 * TAU_US as f64 * MIN_VALIDATORS as f64) as i64;
 
-// Negligibility threshold — φ⁻⁴. Upstream contributions below this
-// weight are not worth computing. Used to derive max recursion depth.
-const NEGLIGIBILITY_THRESHOLD: f64 = 0.14589803375031546;
-const PHI_SQ: f64     = 2.6180339887498948;
-const INV_PHI_SQ: f64 = 0.3819660112501051;
 
 #[hdk_extern]
 pub fn init(_: ()) -> ExternResult<InitCallbackResult> {
@@ -50,8 +46,10 @@ pub struct SubmitEvaluationInput {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CheckQuorumInput {
     pub request_hash: ActionHash,
-    pub registry_dna_hash: DnaHash,
-    pub mutual_credit_dna_hash: DnaHash,
+    /// The merged registry+mutual_credit DNA. One cell now serves both
+    /// zomes — the dual-hash plumbing (and the bridge-hash bug class
+    /// it bred) is gone.
+    pub ledger_dna_hash: DnaHash,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -84,7 +82,7 @@ pub struct RevealEvaluationInput {
     pub score: f64,
     pub details: Option<String>,
     pub salt: String,
-    pub registry_dna_hash: DnaHash,
+    pub ledger_dna_hash: DnaHash,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -117,7 +115,6 @@ fn fetch_links(
 // ─────────────────────────────────────────────
 
 fn get_reputation_score(agent: AgentPubKey, registry_cell_id: CellId) -> ExternResult<f64> {
-    const INV_PHI_SQ: f64 = 0.3819660112501051;
     #[derive(Serialize, Deserialize, Debug)]
     struct ReputationInput {
         agent: AgentPubKey,
@@ -197,10 +194,30 @@ fn submit_attestation_to_registry(
     }
 }
 
+// Local serialization mirror of mutual_credit's FibonacciResult. Per
+// SKILL.md, coordination does not import the remote DNA's crate — it
+// defines its own struct matching the wire shape. Full field set mirrored
+// (not just network_state_hash) so the future drift accumulator, which
+// will need threshold_crossed/next_threshold, doesn't require re-touching
+// this decode when it lands.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FibonacciResultMirror {
+    pub attestation_count: u64,
+    pub threshold_crossed: bool,
+    pub new_credit_supply: Option<i64>,
+    pub admission_allowance: Option<u32>,
+    pub next_threshold: u64,
+    pub network_state_hash: ActionHash,
+}
+
+// Returns the decoded FibonacciResult on success, None on bridge failure.
+// None (not Err) on failure matches the existing tolerance of silent
+// cross-machine bridge failure documented at the call site — a failed
+// notify must not abort quorum resolution.
 fn notify_mutual_credit(
     attestation_hash: ActionHash,
     mutual_credit_cell_id: CellId,
-) -> ExternResult<()> {
+) -> ExternResult<Option<FibonacciResultMirror>> {
     #[derive(Serialize, Deserialize, Debug)]
     struct AttestationNotification {
         attestation_hash: ActionHash,
@@ -215,11 +232,51 @@ fn notify_mutual_credit(
     )?;
 
     match result {
-        ZomeCallResponse::Ok(_) => Ok(()),
-        _ => Ok(()),
+        ZomeCallResponse::Ok(bytes) => Ok(bytes.decode().ok()),
+        _ => Ok(None),
     }
 }
 
+// Local mirror of registry's CloseRoundInput/CloseRoundResult. Coordination
+// detects that a round resolved and tells registry to close it; registry
+// owns the check_closure → write_network_state_manifest sequencing
+// internally behind this one call.
+#[derive(Serialize, Deserialize, Debug)]
+struct CloseRoundInput {
+    manifest_hash: ActionHash,
+    network_state_hash: ActionHash,
+    combined_weight: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct CloseRoundResult {
+    network_state_manifest_hash: ActionHash,
+    passed: bool,
+}
+
+fn close_round(
+    manifest_hash: ActionHash,
+    network_state_hash: ActionHash,
+    combined_weight: f64,
+    registry_cell_id: CellId,
+) -> ExternResult<Option<CloseRoundResult>> {
+    let result = call(
+        CallTargetCell::OtherCell(registry_cell_id),
+        ZomeName::from("registry"),
+        FunctionName::from("close_round"),
+        None,
+        CloseRoundInput {
+            manifest_hash,
+            network_state_hash,
+            combined_weight,
+        },
+    )?;
+
+    match result {
+        ZomeCallResponse::Ok(bytes) => Ok(bytes.decode().ok()),
+        _ => Ok(None),
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RecordEvidenceInput {
@@ -377,7 +434,7 @@ pub fn check_reveal_window(input: CheckQuorumInput) -> ExternResult<CommitmentSt
 
     let registry_cell_id = {
         let agent = agent_info()?.agent_initial_pubkey;
-        CellId::new(input.registry_dna_hash.clone(), agent)
+        CellId::new(input.ledger_dna_hash.clone(), agent)
     };
 
     let commit_links = fetch_links(
@@ -427,7 +484,7 @@ pub fn reveal_evaluation(input: RevealEvaluationInput) -> ExternResult<ActionHas
     for link in &commit_links {
         let rep = get_reputation_score(
             link.author.clone(),
-            CellId::new(input.registry_dna_hash.clone(), agent.clone()),
+            CellId::new(input.ledger_dna_hash.clone(), agent.clone()),
         ).unwrap_or(INV_PHI_SQ);
         let weight = if rep <= 0.0 { INV_PHI_SQ } else { rep };
         commitment_weight += weight;
@@ -633,7 +690,7 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
 
     let registry_cell_id = {
         let agent = agent_info()?.agent_initial_pubkey;
-        CellId::new(input.registry_dna_hash.clone(), agent)
+        CellId::new(input.ledger_dna_hash.clone(), agent)
     };
 
     // Collect all validator reputations to compute total network reputation
@@ -744,9 +801,10 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
     if let Some(record) = get(input.request_hash.clone(), GetOptions::default())? {
         if let Some(entry) = record.entry().as_option() {
             if let Ok(request) = ValidationRequest::try_from(entry) {
+                let manifest_hash = request.manifest_hash.clone();
                 // Bridge 1 — submit attestation to Registry
                 let attestation_hash = match submit_attestation_to_registry(
-                    request.manifest_hash,
+                    manifest_hash.clone(),
                     quorum_blob,
                     registry_cell_id.clone(),
                 ) {
@@ -757,8 +815,32 @@ pub fn check_quorum(input: CheckQuorumInput) -> ExternResult<QuorumResult> {
                 };
 
                 if let Some(att_hash) = attestation_hash {
-                    let mc_cell_id = CellId::new(input.mutual_credit_dna_hash.clone(), agent_info()?.agent_initial_pubkey);
-                    notify_mutual_credit(att_hash, mc_cell_id.clone()).ok();
+                    let mc_cell_id = CellId::new(input.ledger_dna_hash.clone(), agent_info()?.agent_initial_pubkey);
+                    let fib = notify_mutual_credit(att_hash, mc_cell_id.clone())
+                        .ok()
+                        .flatten();
+
+                    // Close the resolved round: registry runs check_closure and
+                    // writes the NetworkStateManifest. Provisional trigger — fires
+                    // on every resolution. The drift accumulator that would gate
+                    // this (fire only when weighted trust-score delta crosses a φ
+                    // threshold) is NOT yet built; firing every round is the honest
+                    // baseline for a system that does not yet define drift, and
+                    // stays purely event-triggered ("no clock, has a mirror").
+                    // Requires the NetworkState hash from mutual_credit — skipped if
+                    // the notify bridge failed (fib is None), since without it there
+                    // is no state entry to reference.
+                    if let Some(fib) = fib {
+                        // Registry pulls economic measurements itself now —
+                        // sibling zome, same cell. Coordination just says
+                        // "the round resolved."
+                        let _ = close_round(
+                            manifest_hash.clone(),
+                            fib.network_state_hash,
+                            combined_weight,
+                            registry_cell_id.clone(),
+                        );
+                    }
 
                     // Credit limit updates and convergence signals are pulled by each
                     // validator's client after they observe quorum reached.

@@ -6,16 +6,15 @@ use registry_integrity::{
     Attestation,
     Warrant as RegistryWarrant,
 };
+use toric_geometry::{
+    PHI, PHI_SQ, INV_PHI, INV_PHI_SQ, INV_PHI_CU, INV_PHI_4,
+    derive_targets, DeviationSignal, ClosureStatus, normalized_deviation,
+    ceiling_deviation, expected_supply,
+    PROBE_SUPPLY_POSITION, PROBE_ROSTER_CONFORMANCE, PROBE_FROZEN_FRACTION,
+};
 
 pub mod blobs;
 use blobs::*;
-
-const PHI: f64     = 1.6180339887498948;
-const PHI_SQ: f64  = 2.6180339887498948;
-const INV_PHI: f64  = 0.6180339887498948;
-const INV_PHI_SQ: f64 = 0.3819660112501051;
-const INV_PHI_CU: f64 = 0.2360679774997896;
-const INV_PHI_4: f64  = 0.14589803375031546;
 
 // Max upstream recursion depth derived from negligibility threshold.
 // At depth 4, φ⁻⁴ = INV_PHI_4 = 0.1459 — contribution is below the
@@ -32,6 +31,7 @@ pub fn init(_: ()) -> ExternResult<InitCallbackResult> {
     fns.insert((zome_info()?.name, FunctionName::from("confirm_warrant")));
     fns.insert((zome_info()?.name, FunctionName::from("record_convergence")));
     fns.insert((zome_info()?.name, FunctionName::from("get_network_reputation")));
+    fns.insert((zome_info()?.name, FunctionName::from("get_scored_agents")));
     fns.insert((zome_info()?.name, FunctionName::from("increment_commit_count")));
     fns.insert((zome_info()?.name, FunctionName::from("increment_reveal_count")));
     fns.insert((zome_info()?.name, FunctionName::from("apply_reveal_penalty")));
@@ -748,8 +748,12 @@ pub fn compute_reputation_score(input: ReputationInput) -> ExternResult<Reputati
 // Network reputation
 // ─────────────────────────────────────────────
 
-#[hdk_extern]
-pub fn get_network_reputation(_: ()) -> ExternResult<NetworkReputationResult> {
+// Canonical network-agent enumeration: every agent that has authored a
+// manifest, discovered by walking GlobalManifestAnchor. Single source of
+// truth for "who is on the network" — get_network_reputation and
+// check_closure both call this so they cannot diverge on the population
+// they measure over. Do not enumerate agents any other way.
+fn collect_network_agents() -> ExternResult<std::collections::HashSet<AgentPubKey>> {
     let path = Path::from("manifests.all");
     let typed = path.typed(LinkTypes::GlobalManifestAnchor)?;
     let all_manifest_links = match typed.exists()? {
@@ -761,6 +765,37 @@ pub fn get_network_reputation(_: ()) -> ExternResult<NetworkReputationResult> {
     for link in &all_manifest_links {
         seen_agents.insert(link.author.clone());
     }
+    Ok(seen_agents)
+}
+
+/// (agent, score) pairs over the canonical population — the input to
+/// the sovereignty roster function. Bridge-callable by mutual_credit
+/// (roster derivation) and by every roster member's independent
+/// verification in sign_network_state.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScoredAgent {
+    pub agent: AgentPubKey,
+    pub score: f64,
+}
+
+#[hdk_extern]
+pub fn get_scored_agents(_: ()) -> ExternResult<Vec<ScoredAgent>> {
+    let mut out: Vec<ScoredAgent> = Vec::new();
+    for agent in collect_network_agents()? {
+        let rep = match get_cached_reputation(&agent)? {
+            Some(cached) => cached,
+            None => match compute_reputation_score(ReputationInput { agent: agent.clone() }) {
+                Ok(r) => r,
+                Err(_) => continue,
+            },
+        };
+        out.push(ScoredAgent { agent, score: rep.score });
+    }
+    Ok(out)
+}
+
+pub fn get_network_reputation(_: ()) -> ExternResult<NetworkReputationResult> {
+    let seen_agents = collect_network_agents()?;
 
     if seen_agents.is_empty() {
         return Ok(NetworkReputationResult {
@@ -966,14 +1001,9 @@ fn compute_warrant_penalty(manifest_hash: &ActionHash) -> f64 {
     total_penalty
 }
 
-#[hdk_extern]
-pub fn compute_trust_score(input: TrustScoreInput) -> ExternResult<TrustScoreResult> {
-    if let Ok(Some(cached)) = get_cached_trust_score(&input.manifest_hash) {
-        return Ok(cached);
-    }
-
+fn recompute_trust_score_uncached(manifest_hash: &ActionHash) -> ExternResult<TrustScoreResult> {
     // Blob type check — trust score only for scoreable artifact types
-    let manifest_record = get(input.manifest_hash.clone(), GetOptions::default())?;
+    let manifest_record = get(manifest_hash.clone(), GetOptions::default())?;
     let blob_type_valid = manifest_record
         .as_ref()
         .and_then(|r| r.entry().as_option())
@@ -990,7 +1020,7 @@ pub fn compute_trust_score(input: TrustScoreInput) -> ExternResult<TrustScoreRes
 
     if !blob_type_valid {
         return Ok(TrustScoreResult {
-            manifest_hash: input.manifest_hash,
+            manifest_hash: manifest_hash.clone(),
             score: 0.0,
             passes: false,
             attestation_count: 0,
@@ -998,11 +1028,11 @@ pub fn compute_trust_score(input: TrustScoreInput) -> ExternResult<TrustScoreRes
         });
     }
 
-    let (direct_score, weighted_count, attestation_count) = compute_direct_score(&input.manifest_hash)?;
-    let upstream_score = compute_upstream_score(&input.manifest_hash, MAX_UPSTREAM_DEPTH);
+    let (direct_score, weighted_count, attestation_count) = compute_direct_score(manifest_hash)?;
+    let upstream_score = compute_upstream_score(manifest_hash, MAX_UPSTREAM_DEPTH);
 
     let convergence_score = {
-        let manifest_record = get(input.manifest_hash.clone(), GetOptions::default())?;
+        let manifest_record = get(manifest_hash.clone(), GetOptions::default())?;
         let content_hash_opt = manifest_record
             .and_then(|r| r.entry().as_option().cloned())
             .and_then(|e| registry_integrity::Manifest::try_from(&e).ok())
@@ -1037,18 +1067,367 @@ pub fn compute_trust_score(input: TrustScoreInput) -> ExternResult<TrustScoreRes
         direct_score
     };
 
-    let warrant_penalty = compute_warrant_penalty(&input.manifest_hash);
+    let warrant_penalty = compute_warrant_penalty(manifest_hash);
     let final_score = (blended - warrant_penalty).clamp(0.0, 1.0);
 
-    let result = TrustScoreResult {
-        manifest_hash: input.manifest_hash.clone(),
+    Ok(TrustScoreResult {
+        manifest_hash: manifest_hash.clone(),
         score: final_score,
         passes: final_score >= INV_PHI,
         attestation_count,
         weighted_attestation_count: weighted_count,
-    };
+    })
+}
+
+#[hdk_extern]
+pub fn compute_trust_score(input: TrustScoreInput) -> ExternResult<TrustScoreResult> {
+    if let Ok(Some(cached)) = get_cached_trust_score(&input.manifest_hash) {
+        return Ok(cached);
+    }
+
+    let result = recompute_trust_score_uncached(&input.manifest_hash)?;
     write_trust_score_cache(&input.manifest_hash, &result).ok();
     Ok(result)
+}
+
+// ─────────────────────────────────────────────
+// Closure detection
+// ─────────────────────────────────────────────
+
+fn fetch_latest_geometry_params() -> ExternResult<Option<(ActionHash, registry_integrity::GeometryParams)>> {
+    use registry_integrity::GeometryParams;
+
+    let path = Path::from("geometry.params");
+    let typed = path.typed(LinkTypes::GeometryParamsAnchor)?;
+    let links = fetch_links(typed.path_entry_hash()?, LinkTypes::GeometryParamsAnchor)?;
+    if let Some(link) = links.last() {
+        if let Some(hash) = link.target.clone().into_action_hash() {
+            if let Some(record) = get(hash.clone(), GetOptions::default())? {
+                if let Some(entry) = record.entry().as_option() {
+                    if let Ok(gp) = GeometryParams::try_from(entry) {
+                        return Ok(Some((hash, gp)));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Run the three active closure probes against live DHT state:
+///
+///   - Probe 2: quorum weight measured-vs-target (latest round)
+///   - Probe 3: reveal discipline measured-vs-target (network-wide)
+///   - Probe 4: trust score recompute-vs-stored  (given manifest)
+///
+/// Each probe emits a DeviationSignal; the caller (NetworkRoundManifest
+/// author) serializes the returned ClosureStatus into the round entry.
+///
+/// Returns empty signals (not an error) when GeometryParams are absent —
+/// the network has no target to check against. Callers must interpret
+/// `worst_deviation() == None` as "investigate, not healthy."
+fn fetch_economic_snapshot() -> Option<EconomicSnapshot> {
+    match call(
+        CallTargetCell::Local,
+        ZomeName::from("mutual_credit"),
+        FunctionName::from("economic_snapshot"),
+        None,
+        (),
+    ) {
+        Ok(ZomeCallResponse::Ok(bytes)) => bytes.decode().ok(),
+        _ => None,
+    }
+}
+
+fn check_closure(
+    manifest_hash: &ActionHash,
+    combined_weight: f64,
+) -> ExternResult<ClosureStatus> {
+    let (gp_hash, gp) = match fetch_latest_geometry_params()? {
+        Some(pair) => pair,
+        None => return Ok(ClosureStatus { passed: true, signals: vec![] }),
+    };
+    let targets = derive_targets(gp.tau_us);
+    let gp_hash_bytes: Vec<u8> = gp_hash.get_raw_32().to_vec();
+
+    let mut signals: Vec<DeviationSignal> = Vec::new();
+
+    // ── Probe 3: reveal discipline (network reveal rate vs φ⁻¹ target) ──
+    // Network-wide aggregation over the canonical agent set. Uses
+    // collect_network_agents (the same enumeration get_network_reputation
+    // uses) so the two cannot diverge on what "the network" is. actual =
+    // Σreveals / Σcommits across all agents; expected = reveal_rate_target
+    // (φ⁻¹), the same pass line used everywhere else in the system.
+    //
+    // No-data handling: when sum_commits == 0 the probe is OMITTED, not
+    // pushed as a synthetic healthy 0.0. "No measurement was possible" must
+    // stay structurally distinct from "measured and healthy" all the way up
+    // to worst_deviation — collapsing them would manufacture confidence the
+    // system doesn't have, the same failure as a cache-compared-to-itself
+    // audit. An empty network simply contributes no probe-3 signal this
+    // round; probes 2 and 4 stand on their own.
+    {
+        let mut sum_commits: u64 = 0;
+        let mut sum_reveals: u64 = 0;
+        for a in collect_network_agents()? {
+            if let Ok(r) = compute_reputation_score(ReputationInput { agent: a }) {
+                sum_commits += r.total_commits as u64;
+                sum_reveals += r.total_reveals as u64;
+            }
+        }
+        if sum_commits > 0 {
+            let actual_reveal_rate = sum_reveals as f64 / sum_commits as f64;
+            signals.push(DeviationSignal {
+                probe_id: 3,
+                deviation_magnitude: normalized_deviation(
+                    targets.reveal_rate_target,
+                    actual_reveal_rate,
+                ),
+                expected: targets.reveal_rate_target,
+                actual: actual_reveal_rate,
+                geometry_params_hash: gp_hash_bytes.clone(),
+                manifest_hash: None,
+            });
+        }
+    }
+
+    // ── Probe 2: quorum weight vs target ──────────────────────────
+    // actual = this round's combined_weight, passed in from check_quorum
+    // (the value it already computed for its own resolution decision) —
+    // measures the round being closed, not a lagged prior round.
+    // expected = total_reputation × quorum_weight_multiplier (φ⁻¹ ideal).
+    {
+        let net_rep = match get_network_reputation(()) {
+            Ok(r) => r,
+            Err(_) => NetworkReputationResult {
+                honest_rep_fraction: 1.0,
+                total_reputation: 0.0,
+                honest_reputation: 0.0,
+                average_reputation: INV_PHI_SQ,
+                agent_count: 0,
+                warranted_agent_count: 0,
+            },
+        };
+        let expected_qw = net_rep.total_reputation * targets.quorum_weight_multiplier;
+        signals.push(DeviationSignal {
+            probe_id: 2,
+            deviation_magnitude: normalized_deviation(expected_qw, combined_weight),
+            expected: expected_qw,
+            actual: combined_weight,
+            geometry_params_hash: gp_hash_bytes.clone(),
+            manifest_hash: None,
+        });
+    }
+
+    // ── Probe 4: trust score drift ────────────────────────────────
+    let ts_cached = get_cached_trust_score(manifest_hash)?;
+    let ts_recomputed = match recompute_trust_score_uncached(manifest_hash) {
+        Ok(r) => r,
+        Err(_) => TrustScoreResult {
+            manifest_hash: manifest_hash.clone(),
+            score: 0.0,
+            passes: false,
+            attestation_count: 0,
+            weighted_attestation_count: 0.0,
+        },
+    };
+    let expected_ts = ts_cached.map(|c| c.score).unwrap_or(0.0);
+    let actual_ts = ts_recomputed.score;
+    signals.push(DeviationSignal {
+        probe_id: 4,
+        deviation_magnitude: normalized_deviation(expected_ts, actual_ts),
+        expected: expected_ts,
+        actual: actual_ts,
+        geometry_params_hash: gp_hash_bytes.clone(),
+        manifest_hash: Some(manifest_hash.get_raw_32().to_vec()),
+    });
+
+    // ── Probes 5–7: economic domain ───────────────────────────────
+    // Measured by the mutual_credit sibling zome, pulled locally.
+    // None ⇒ omitted, not synthesized healthy — same no-data discipline
+    // as probe 3.
+    let economic = fetch_economic_snapshot();
+    if let Some(econ) = economic.as_ref() {
+        // Probe 5: supply position. Live supply vs genesis folded
+        // through ⌊supply × φ⌋ per crossing — the per-step law integrity
+        // enforces, replayed from origin. Any mismatch means a step
+        // escaped validation (or a fork is being read).
+        let expected = expected_supply(econ.cycle) as f64;
+        signals.push(DeviationSignal {
+            probe_id: PROBE_SUPPLY_POSITION,
+            deviation_magnitude: normalized_deviation(expected, econ.credit_supply as f64),
+            expected,
+            actual: econ.credit_supply as f64,
+            geometry_params_hash: gp_hash_bytes.clone(),
+            manifest_hash: None,
+        });
+
+        // Probe 6: roster conformance. Jaccard distance between the
+        // sealed roster and the reputation-derived one — the
+        // sovereignty probe. Nonzero means governance has drifted from
+        // the function that legitimizes it; a persistently nonzero
+        // value under an unchanged roster is entrenchment, observable.
+        // Omitted before sovereignty is declared (no roster to audit).
+        if !econ.sealed_roster.is_empty() {
+            signals.push(DeviationSignal {
+                probe_id: PROBE_ROSTER_CONFORMANCE,
+                deviation_magnitude: econ.roster_divergence,
+                expected: 0.0,
+                actual: econ.roster_divergence,
+                geometry_params_hash: gp_hash_bytes.clone(),
+                manifest_hash: None,
+            });
+        }
+
+        // Probe 7: frozen fraction vs the negligibility ceiling φ⁻⁴.
+        // Frozen mass should be noise; deviation grows only above the
+        // ceiling. Omitted when there are no accounts to measure.
+        if econ.account_count > 0 {
+            let frozen_fraction = econ.frozen_count as f64 / econ.account_count as f64;
+            signals.push(DeviationSignal {
+                probe_id: PROBE_FROZEN_FRACTION,
+                deviation_magnitude: ceiling_deviation(INV_PHI_4, frozen_fraction),
+                expected: INV_PHI_4,
+                actual: frozen_fraction,
+                geometry_params_hash: gp_hash_bytes.clone(),
+                manifest_hash: None,
+            });
+        }
+    }
+
+    let passed = signals.iter().all(|s| s.deviation_magnitude < INV_PHI);
+    Ok(ClosureStatus { passed, signals })
+}
+
+fn unimplemented_metric_blob() -> ExternResult<SerializedBytes> {
+    let bytes = serde_json::to_vec(&serde_json::json!({}))
+        .map_err(|e| wasm_error!(WasmErrorInner::Guest(format!("metric stub encode: {e}"))))?;
+    Ok(SerializedBytes::from(UnsafeBytes::from(bytes)))
+}
+
+fn write_network_state_manifest(
+    network_state_hash: ActionHash,
+    closure_status: ClosureStatus,
+) -> ExternResult<ActionHash> {
+    use registry_integrity::NetworkStateManifest;
+
+    let geometry_params_hash = fetch_latest_geometry_params()?.map(|(h, _)| h);
+
+    let nsm_path = Path::from("network.state");
+    let nsm_typed = nsm_path.typed(LinkTypes::NetworkStateManifestAnchor)?;
+    let nsm_anchor = nsm_typed.path_entry_hash()?;
+    let previous_manifest_hash = match nsm_typed.exists()? {
+        true => {
+            let links = fetch_links(nsm_anchor.clone(), LinkTypes::NetworkStateManifestAnchor)?;
+            links.last().and_then(|l| l.target.clone().into_action_hash())
+        }
+        false => None,
+    };
+
+    let closure_bytes = serde_json::to_vec(&closure_status)
+        .map_err(|e| wasm_error!(WasmErrorInner::Guest(format!("closure_status encode: {e}"))))?;
+    let closure_status_sb = SerializedBytes::from(UnsafeBytes::from(closure_bytes));
+
+    let manifest = NetworkStateManifest {
+        network_state_hash,
+        trust_score_distribution: unimplemented_metric_blob()?,
+        agent_population: unimplemented_metric_blob()?,
+        credit_flow_patterns: unimplemented_metric_blob()?,
+        disagreement_signal_density: 0,
+        geometry_params_hash,
+        closure_status: closure_status_sb,
+        previous_manifest_hash,
+    };
+
+    let action_hash = create_entry(EntryTypes::NetworkStateManifest(manifest))?;
+    create_link(
+        nsm_anchor,
+        action_hash.clone(),
+        LinkTypes::NetworkStateManifestAnchor,
+        (),
+    )?;
+    Ok(action_hash)
+}
+
+/// Latest self-observation, for consumers (UI, MCP) that want to see
+/// what the network sees of itself: the most recent NetworkStateManifest's
+/// closure status, decoded.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LatestClosure {
+    pub manifest_hash: ActionHash,
+    pub closure: ClosureStatus,
+}
+
+#[hdk_extern]
+pub fn get_latest_closure(_: ()) -> ExternResult<Option<LatestClosure>> {
+    let nsm_path = Path::from("network.state");
+    let nsm_typed = nsm_path.typed(LinkTypes::NetworkStateManifestAnchor)?;
+    if !nsm_typed.exists()? {
+        return Ok(None);
+    }
+    let nsm_anchor = nsm_typed.path_entry_hash()?;
+    let links = fetch_links(nsm_anchor, LinkTypes::NetworkStateManifestAnchor)?;
+    let Some(hash) = links.last().and_then(|l| l.target.clone().into_action_hash()) else {
+        return Ok(None);
+    };
+    let Some(record) = get(hash.clone(), GetOptions::default())? else {
+        return Ok(None);
+    };
+    let Some(entry) = record.entry().as_option() else {
+        return Ok(None);
+    };
+    let manifest = registry_integrity::NetworkStateManifest::try_from(entry)
+        .map_err(|e| wasm_error!(WasmErrorInner::Guest(format!("decode: {:?}", e))))?;
+    let closure: ClosureStatus = serde_json::from_slice(manifest.closure_status.bytes())
+        .map_err(|e| wasm_error!(WasmErrorInner::Guest(format!("closure decode: {}", e))))?;
+    Ok(Some(LatestClosure { manifest_hash: hash, closure }))
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CloseRoundInput {
+    pub manifest_hash: ActionHash,
+    pub network_state_hash: ActionHash,
+    pub combined_weight: f64,
+}
+
+/// Mirror of mutual_credit's EconomicSnapshot — field-identical wire
+/// shape. Fetched by check_closure via local sibling-zome call: registry
+/// owns what closing means and now pulls the measurement itself; a
+/// failed call omits probes 5–7 this round ("no measurement" stays
+/// distinct from "measured healthy").
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EconomicSnapshot {
+    pub cycle: u64,
+    pub credit_supply: i64,
+    pub sealed_roster: Vec<AgentPubKey>,
+    pub roster_divergence: f64,
+    pub account_count: u32,
+    pub frozen_count: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CloseRoundResult {
+    pub network_state_manifest_hash: ActionHash,
+    pub passed: bool,
+}
+
+// Single bridge entry point for closing a resolved round. Coordination's
+// job ends at "this round resolved"; registry owns everything about what
+// closing means, including the order: run check_closure first, then write
+// the NetworkStateManifest carrying that closure result. Coordination does
+// not call check_closure and write_network_state_manifest separately —
+// that would put registry's internal sequencing under coordination's
+// control across the bridge.
+#[hdk_extern]
+pub fn close_round(input: CloseRoundInput) -> ExternResult<CloseRoundResult> {
+    let closure_status = check_closure(&input.manifest_hash, input.combined_weight)?;
+    let passed = closure_status.passed;
+    let network_state_manifest_hash =
+        write_network_state_manifest(input.network_state_hash, closure_status)?;
+    Ok(CloseRoundResult {
+        network_state_manifest_hash,
+        passed,
+    })
 }
 
 // ─────────────────────────────────────────────

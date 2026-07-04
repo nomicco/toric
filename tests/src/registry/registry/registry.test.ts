@@ -69,9 +69,9 @@ test("create and retrieve a manifest", async () => {
   await runScenario(async (scenario: Scenario) => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
-    const manifestHash: ActionHash = await createAiModelManifest(alice.namedCells.get("registry")!);
+    const manifestHash: ActionHash = await createAiModelManifest(alice.namedCells.get("ledger")!);
     assert.ok(manifestHash);
-    const record: Record = await alice.namedCells.get("registry")!.callZome({ zome_name: "registry", fn_name: "get_manifest", payload: manifestHash });
+    const record: Record = await alice.namedCells.get("ledger")!.callZome({ zome_name: "registry", fn_name: "get_manifest", payload: manifestHash });
     assert.ok(record);
     assert.deepEqual(record.signed_action.hashed.hash, manifestHash);
   }, true, { disableLocalServices: true });
@@ -81,9 +81,9 @@ test("manifest is append-only — update is rejected", async () => {
   await runScenario(async (scenario: Scenario) => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
-    const manifestHash: ActionHash = await createAiModelManifest(alice.namedCells.get("registry")!);
+    const manifestHash: ActionHash = await createAiModelManifest(alice.namedCells.get("ledger")!);
     try {
-      await alice.namedCells.get("registry")!.callZome({ zome_name: "registry", fn_name: "update_entry", payload: { original_action_hash: manifestHash, previous_action_hash: manifestHash, updated_entry: { metadata_blob: new Uint8Array() } } });
+      await alice.namedCells.get("ledger")!.callZome({ zome_name: "registry", fn_name: "update_entry", payload: { original_action_hash: manifestHash, previous_action_hash: manifestHash, updated_entry: { metadata_blob: new Uint8Array() } } });
       assert.fail("Update should have been rejected");
     } catch (e) {
       assert.ok(e, "Update correctly rejected");
@@ -95,10 +95,10 @@ test("create attestation linked to manifest", async () => {
   await runScenario(async (scenario: Scenario) => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
-    const manifestHash = await createAiModelManifest(alice.namedCells.get("registry")!);
-    const attestationHash = await createAttestation(alice.namedCells.get("registry")!, manifestHash);
+    const manifestHash = await createAiModelManifest(alice.namedCells.get("ledger")!);
+    const attestationHash = await createAttestation(alice.namedCells.get("ledger")!, manifestHash);
     assert.ok(attestationHash);
-    const attestations: Record[] = await alice.namedCells.get("registry")!.callZome({ zome_name: "registry", fn_name: "get_manifest_attestations", payload: manifestHash });
+    const attestations: Record[] = await alice.namedCells.get("ledger")!.callZome({ zome_name: "registry", fn_name: "get_manifest_attestations", payload: manifestHash });
     assert.equal(attestations.length, 1);
   }, true, { disableLocalServices: true });
 });
@@ -108,17 +108,17 @@ test("create warrant linked to manifest", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createAiModelManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createAiModelManifest(alice.namedCells.get("ledger")!);
     await new Promise(r => setTimeout(r, 5000));
 
     // Must create evidence first — warrant requires valid evidence_hash
     const evidenceHash = await createEvidence(alice.namedCells.get("coordination")!, manifestHash);
     await new Promise(r => setTimeout(r, 5000));
 
-    const warrantHash = await createWarrant(alice.namedCells.get("registry")!, manifestHash, evidenceHash);
+    const warrantHash = await createWarrant(alice.namedCells.get("ledger")!, manifestHash, evidenceHash);
     assert.ok(warrantHash);
 
-    const warrants: Record[] = await alice.namedCells.get("registry")!.callZome({
+    const warrants: Record[] = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "get_manifest_warrants",
       payload: manifestHash,
@@ -133,20 +133,20 @@ test("reputation score reflects attestations and warrants", async () => {
     const bob = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const initialScore = await alice.namedCells.get("registry")!.callZome({ zome_name: "registry", fn_name: "compute_reputation_score", payload: { agent: alice.agentPubKey } });
+    const initialScore = await alice.namedCells.get("ledger")!.callZome({ zome_name: "registry", fn_name: "compute_reputation_score", payload: { agent: alice.agentPubKey } });
     assert.equal(initialScore.score, 0.3819660112501051);
 
     // Bob attests alice's manifests — self-attestation is excluded
-    const manifest1 = await createAiModelManifest(alice.namedCells.get("registry")!);
-    const manifest2 = await createAiModelManifest(alice.namedCells.get("registry")!);
+    const manifest1 = await createAiModelManifest(alice.namedCells.get("ledger")!);
+    const manifest2 = await createAiModelManifest(alice.namedCells.get("ledger")!);
     // Wait for manifests to propagate to bob's DHT before attesting
     await new Promise(r => setTimeout(r, 8000));
-    await createAttestation(bob.namedCells.get("registry")!, manifest1);
+    await createAttestation(bob.namedCells.get("ledger")!, manifest1);
     // skip manifest2 — only need one attestation to test score increase
     await new Promise(r => setTimeout(r, 500));
 
     // Query from bob's cell — he has the links he just created
-    const afterAttestations = await bob.namedCells.get("registry")!.callZome({
+    const afterAttestations = await bob.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "compute_reputation_score",
       payload: { agent: alice.agentPubKey },
@@ -155,10 +155,10 @@ test("reputation score reflects attestations and warrants", async () => {
     // Alice warrants her own manifest — requires evidence first
     const evidenceHash = await createEvidence(alice.namedCells.get("coordination")!, manifest1);
     await new Promise(r => setTimeout(r, 5000));
-    await createWarrant(alice.namedCells.get("registry")!, manifest1, evidenceHash);
+    await createWarrant(alice.namedCells.get("ledger")!, manifest1, evidenceHash);
     
 
-    const afterWarrant = await bob.namedCells.get("registry")!.callZome({ zome_name: "registry", fn_name: "compute_reputation_score", payload: { agent: alice.agentPubKey } });
+    const afterWarrant = await bob.namedCells.get("ledger")!.callZome({ zome_name: "registry", fn_name: "compute_reputation_score", payload: { agent: alice.agentPubKey } });
     assert.ok(afterWarrant.score < afterAttestations.score, "Score should decrease with warrants");
   }, true, { disableLocalServices: true });
 });
@@ -168,9 +168,9 @@ test("two agents — manifests propagate across DHT", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     const bob = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
-    const manifestHash = await createAiModelManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createAiModelManifest(alice.namedCells.get("ledger")!);
     await new Promise(r => setTimeout(r, 8000));
-    const record: Record = await bob.namedCells.get("registry")!.callZome({ zome_name: "registry", fn_name: "get_manifest", payload: manifestHash });
+    const record: Record = await bob.namedCells.get("ledger")!.callZome({ zome_name: "registry", fn_name: "get_manifest", payload: manifestHash });
     assert.ok(record, "Bob can read Alice's manifest from DHT");
   }, true, { disableLocalServices: true });
 });
@@ -179,11 +179,11 @@ test("get all manifests for an agent", async () => {
   await runScenario(async (scenario: Scenario) => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
-    await createAiModelManifest(alice.namedCells.get("registry")!);
-    await createAiModelManifest(alice.namedCells.get("registry")!);
-    await createAiModelManifest(alice.namedCells.get("registry")!);
+    await createAiModelManifest(alice.namedCells.get("ledger")!);
+    await createAiModelManifest(alice.namedCells.get("ledger")!);
+    await createAiModelManifest(alice.namedCells.get("ledger")!);
     await new Promise(r => setTimeout(r, 500));
-    const manifests: Record[] = await alice.namedCells.get("registry")!.callZome({ zome_name: "registry", fn_name: "get_agent_manifests", payload: alice.agentPubKey });
+    const manifests: Record[] = await alice.namedCells.get("ledger")!.callZome({ zome_name: "registry", fn_name: "get_agent_manifests", payload: alice.agentPubKey });
     assert.equal(manifests.length, 3);
   }, true, { disableLocalServices: true });
 });
@@ -193,10 +193,10 @@ test("compute_trust_score — returns 0 with no attestations", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createAiModelManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createAiModelManifest(alice.namedCells.get("ledger")!);
     await new Promise(r => setTimeout(r, 500));
 
-    const result = await alice.namedCells.get("registry")!.callZome({
+    const result = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "compute_trust_score",
       payload: { manifest_hash: manifestHash },
@@ -214,13 +214,13 @@ test("compute_trust_score — increases with passing attestation", async () => {
     const bob   = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createAiModelManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createAiModelManifest(alice.namedCells.get("ledger")!);
     await new Promise(r => setTimeout(r, 10000));
 
-    await createAttestation(bob.namedCells.get("registry")!, manifestHash);
+    await createAttestation(bob.namedCells.get("ledger")!, manifestHash);
     await new Promise(r => setTimeout(r, 3000));
 
-    const result = await bob.namedCells.get("registry")!.callZome({
+    const result = await bob.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "compute_trust_score",
       payload: { manifest_hash: manifestHash },
@@ -237,18 +237,18 @@ test("compute_trust_score — cache returns same result on second call", async (
     const bob   = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createAiModelManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createAiModelManifest(alice.namedCells.get("ledger")!);
     await new Promise(r => setTimeout(r, 10000));
-    await createAttestation(bob.namedCells.get("registry")!, manifestHash);
+    await createAttestation(bob.namedCells.get("ledger")!, manifestHash);
     await new Promise(r => setTimeout(r, 3000));
 
-    const first = await alice.namedCells.get("registry")!.callZome({
+    const first = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "compute_trust_score",
       payload: { manifest_hash: manifestHash },
     });
 
-    const second = await alice.namedCells.get("registry")!.callZome({
+    const second = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "compute_trust_score",
       payload: { manifest_hash: manifestHash },
@@ -266,22 +266,22 @@ test("compute_trust_score — cache invalidates after new attestation", async ()
     const carol = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createAiModelManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createAiModelManifest(alice.namedCells.get("ledger")!);
     await new Promise(r => setTimeout(r, 12000));
 
-    await createAttestation(bob.namedCells.get("registry")!, manifestHash);
+    await createAttestation(bob.namedCells.get("ledger")!, manifestHash);
     await new Promise(r => setTimeout(r, 3000));
 
-    const before = await alice.namedCells.get("registry")!.callZome({
+    const before = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "compute_trust_score",
       payload: { manifest_hash: manifestHash },
     });
 
-    await createAttestation(carol.namedCells.get("registry")!, manifestHash);
+    await createAttestation(carol.namedCells.get("ledger")!, manifestHash);
     await new Promise(r => setTimeout(r, 3000));
 
-    const after = await alice.namedCells.get("registry")!.callZome({
+    const after = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "compute_trust_score",
       payload: { manifest_hash: manifestHash },
@@ -296,10 +296,10 @@ test("lineage links — derivatives queryable from upstream", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const upstreamHash = await createAiModelManifest(alice.namedCells.get("registry")!);
+    const upstreamHash = await createAiModelManifest(alice.namedCells.get("ledger")!);
     await new Promise(r => setTimeout(r, 500));
 
-    const derivativeHash: ActionHash = await alice.namedCells.get("registry")!.callZome({
+    const derivativeHash: ActionHash = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "create_manifest",
       payload: {
@@ -317,7 +317,7 @@ test("lineage links — derivatives queryable from upstream", async () => {
     });
     await new Promise(r => setTimeout(r, 2000));
 
-    const derivatives: ActionHash[] = await alice.namedCells.get("registry")!.callZome({
+    const derivatives: ActionHash[] = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "get_derivatives",
       payload: { manifest_hash: upstreamHash },
@@ -336,7 +336,7 @@ test("convergence — same content hash registered by two agents", async () => {
 
     const sharedContentHash = "sha256:identicalmodel789";
 
-    await alice.namedCells.get("registry")!.callZome({
+    await alice.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "create_manifest",
       payload: {
@@ -354,7 +354,7 @@ test("convergence — same content hash registered by two agents", async () => {
 
     await new Promise(r => setTimeout(r, 5000));
 
-    await bob.namedCells.get("registry")!.callZome({
+    await bob.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "create_manifest",
       payload: {
@@ -372,7 +372,7 @@ test("convergence — same content hash registered by two agents", async () => {
 
     await new Promise(r => setTimeout(r, 5000));
 
-    const manifests: ActionHash[] = await alice.namedCells.get("registry")!.callZome({
+    const manifests: ActionHash[] = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "registry",
       fn_name: "get_by_content_hash",
       payload: { content_hash: sharedContentHash },
@@ -387,12 +387,12 @@ test("warrant requires evidence hash — filing without evidence rejected", asyn
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createAiModelManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createAiModelManifest(alice.namedCells.get("ledger")!);
     await new Promise(r => setTimeout(r, 500));
 
     const fakeHash = manifestHash; // not a real evidence record
     try {
-      await alice.namedCells.get("registry")!.callZome({
+      await alice.namedCells.get("ledger")!.callZome({
         zome_name: "registry",
         fn_name: "create_warrant",
         payload: {

@@ -5,10 +5,13 @@ opt-level = "z"
 opt-level = "z"
 
 [workspace]
-members = ["dnas/*/zomes/coordinator/*", "dnas/*/zomes/integrity/*", 
-"dnas/identity/zomes/integrity/identity", 
-"dnas/identity/zomes/coordinator/identity",
-"src-tauri",]
+members = [
+    "dnas/shared/geometry",
+    "dnas/*/zomes/coordinator/*",
+    "dnas/*/zomes/integrity/*",
+    "dnas/identity/zomes/integrity/identity",
+    "dnas/identity/zomes/coordinator/identity",
+]
 resolver = "2"
 
 [workspace.dependencies]
@@ -19,6 +22,9 @@ serde = "1.0"
 serde_json = "1"
 sha2 = "0.10"
 hex = "0.4"
+
+[workspace.dependencies.toric-geometry]
+path = "dnas/shared/geometry"
 
 [workspace.dependencies.registry]
 path = "dnas/registry/zomes/coordinator/registry"

@@ -65,6 +65,75 @@ pub struct WarrantConfirmation {
     pub confirmed_at: Timestamp,
 }
 
+// Network-health snapshot owned by registry. Does NOT duplicate the
+// mutual_credit-owned NetworkState (attestation_count, credit_supply,
+// cycle, phase, next_fibonacci_threshold) — it references that entry by
+// hash and stores only what registry itself measures. The mutual_credit
+// slice is reached through network_state_hash, never copied here.
+#[hdk_entry_helper]
+#[derive(Clone)]
+pub struct NetworkStateManifest {
+    pub network_state_hash: ActionHash,
+    pub trust_score_distribution: SerializedBytes,
+    pub agent_population: SerializedBytes,
+    pub credit_flow_patterns: SerializedBytes,
+    pub disagreement_signal_density: u32,
+    pub geometry_params_hash: Option<ActionHash>,
+    pub closure_status: SerializedBytes,
+    pub previous_manifest_hash: Option<ActionHash>,
+}
+
+// Only tau_us is stored. Every other constant (MIN_VALIDATORS,
+// MAX_UPSTREAM_DEPTH, REVEAL_DEADLINE, admission multiplier) is derived
+// from tau_us and φ at read time in the coordinator, not stored here.
+#[hdk_entry_helper]
+#[derive(Clone)]
+pub struct GeometryParams {
+    pub tau_us: u64,
+}
+
+// Derived, not declared. Stores only the GeometryParams hash it was
+// derived against plus a derivation version. Targets are recomputed from
+// that GeometryParams by the coordinator at read time — nothing forgeable
+// is stored, because the integrity zome cannot read the DHT to validate
+// stored target values. A wrong NetworkGoalManifest is one whose hash
+// doesn't resolve, not one whose numbers disagree with the geometry.
+#[hdk_entry_helper]
+#[derive(Clone)]
+pub struct NetworkGoalManifest {
+    pub geometry_params_hash: ActionHash,
+    pub derivation_version: u32,
+}
+
+// One entry per validation round. References everything the round
+// produced by hash rather than embedding it. closure_status carries the
+// serialized ClosureStatus (per-probe deviation magnitudes), not a bool.
+// No round timestamp — sequencing comes from previous_round_hash and the
+// action header.
+#[hdk_entry_helper]
+#[derive(Clone)]
+pub struct NetworkRoundManifest {
+    pub tau_us: u64,
+    pub network_state_hash: ActionHash,
+    pub network_goal_manifest_hash: ActionHash,
+    pub geometry_params_hash: ActionHash,
+    pub closure_status: SerializedBytes,
+    pub active_probe_set_hash: Option<ActionHash>,
+    pub quorum_participant_keys: Vec<AgentPubKey>,
+    pub previous_round_hash: Option<ActionHash>,
+}
+
+// Committed at genesis, immutable. The network's function in four
+// falsifiable clauses.
+#[hdk_entry_helper]
+#[derive(Clone)]
+pub struct NetworkIdentity {
+    pub attests_integrity_of: String,
+    pub through_mechanism: String,
+    pub weighted_by: String,
+    pub producing: String,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[hdk_entry_types]
@@ -77,6 +146,11 @@ pub enum EntryTypes {
     TrustScoreCache(TrustScoreCache),
     WarrantConfirmation(WarrantConfirmation),
     ConvergenceSignal(ConvergenceSignal),
+    NetworkStateManifest(NetworkStateManifest),
+    GeometryParams(GeometryParams),
+    NetworkGoalManifest(NetworkGoalManifest),
+    NetworkRoundManifest(NetworkRoundManifest),
+    NetworkIdentity(NetworkIdentity),
 }
 
 // ─────────────────────────────────────────────
@@ -101,6 +175,11 @@ pub enum LinkTypes {
     ManifestToWarrantConfirmation,
     AgentToConvergenceSignal,
     GlobalManifestAnchor,
+    GeometryParamsAnchor,
+    NetworkStateManifestAnchor,
+    NetworkGoalManifestAnchor,
+    NetworkRoundAnchor,
+    NetworkIdentityAnchor,
 }
 
 // ─────────────────────────────────────────────
@@ -282,6 +361,16 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
                     Ok(ValidateCallbackResult::Valid),
                 EntryTypes::ConvergenceSignal(_) =>
                     Ok(ValidateCallbackResult::Valid),
+                EntryTypes::NetworkStateManifest(_) =>
+                    Ok(ValidateCallbackResult::Valid),
+                EntryTypes::GeometryParams(_) =>
+                    Ok(ValidateCallbackResult::Valid),
+                EntryTypes::NetworkGoalManifest(_) =>
+                    Ok(ValidateCallbackResult::Valid),
+                EntryTypes::NetworkRoundManifest(_) =>
+                    Ok(ValidateCallbackResult::Valid),
+                EntryTypes::NetworkIdentity(_) =>
+                    Ok(ValidateCallbackResult::Valid),
             }
         }
 
@@ -330,7 +419,12 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
             LinkTypes::ManifestToWarrantConfirmation =>
                 Ok(ValidateCallbackResult::Valid),
             LinkTypes::AgentToConvergenceSignal |
-            LinkTypes::GlobalManifestAnchor =>
+            LinkTypes::GlobalManifestAnchor |
+            LinkTypes::GeometryParamsAnchor |
+            LinkTypes::NetworkStateManifestAnchor |
+            LinkTypes::NetworkGoalManifestAnchor |
+            LinkTypes::NetworkRoundAnchor |
+            LinkTypes::NetworkIdentityAnchor =>
                 Ok(ValidateCallbackResult::Valid),
         },
 
@@ -355,6 +449,16 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
                 EntryTypes::WarrantConfirmation(_) =>
                     Ok(ValidateCallbackResult::Valid),
                 EntryTypes::ConvergenceSignal(_) =>
+                    Ok(ValidateCallbackResult::Valid),
+                EntryTypes::NetworkStateManifest(_) =>
+                    Ok(ValidateCallbackResult::Valid),
+                EntryTypes::GeometryParams(_) =>
+                    Ok(ValidateCallbackResult::Valid),
+                EntryTypes::NetworkGoalManifest(_) =>
+                    Ok(ValidateCallbackResult::Valid),
+                EntryTypes::NetworkRoundManifest(_) =>
+                    Ok(ValidateCallbackResult::Valid),
+                EntryTypes::NetworkIdentity(_) =>
                     Ok(ValidateCallbackResult::Valid),
             }
         }
@@ -398,7 +502,12 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
             LinkTypes::ManifestToWarrantConfirmation =>
                 Ok(ValidateCallbackResult::Valid),
             LinkTypes::AgentToConvergenceSignal |
-            LinkTypes::GlobalManifestAnchor =>
+            LinkTypes::GlobalManifestAnchor |
+            LinkTypes::GeometryParamsAnchor |
+            LinkTypes::NetworkStateManifestAnchor |
+            LinkTypes::NetworkGoalManifestAnchor |
+            LinkTypes::NetworkRoundAnchor |
+            LinkTypes::NetworkIdentityAnchor =>
                 Ok(ValidateCallbackResult::Valid),
         },
 

@@ -74,6 +74,32 @@ pub struct DatasetManifest {
     pub license: Option<String>,
     pub artifact_timestamp: Option<u64>,
     pub tags: Option<Vec<String>>,
+
+    // Discovery mechanism. A DatasetManifest with a domain is a probe: a
+    // test that some population of agents fetches as active vocabulary.
+    // Distinct from blob_type (artifact kind) — domain is test kind.
+    //
+    // #[serde(default)] on both: existing DatasetManifest entries predate
+    // these fields and must still deserialize. Legacy entry → domain ""
+    // (not a probe) and polarity None (not applicable) — both honest
+    // "unset", neither a fabricated meaningful value.
+    #[serde(default)]
+    pub domain: String,
+
+    // Consequence wiring, assigned once by the probe's filer, not derived:
+    //   Some(true)  → positive result is a capability  (trust update)
+    //   Some(false) → positive result is a violation   (warrant)
+    //   None        → not a probe / polarity not applicable
+    // Option<bool>, not bool: a defaulted bare bool would relabel every
+    // legacy dataset as Some(false) = immune-layer violation-probe, which
+    // is a manufactured measurement from no measurement. None keeps unset
+    // structurally distinct from an explicit immune-layer false, so no
+    // future reader can misread it and no cross-field gate is relied on.
+    // polarity does NOT enter any φ computation — the geometry is identical
+    // regardless of its value; it only selects which existing code path
+    // fires on confirmation.
+    #[serde(default)]
+    pub polarity: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

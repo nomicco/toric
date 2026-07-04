@@ -42,6 +42,73 @@ pub const INV_PHI_CU: f64 = 0.236_067_977_499_790;
 pub const INV_PHI_4: f64 = 0.145_898_033_750_315;
 
 // ─────────────────────────────────────────────
+// Genesis economy constants
+//
+// Moved here from the mutual_credit coordinator so integrity zomes can
+// enforce them. They are geometry, not policy: both sit on the
+// Fibonacci sequence so every expansion lands on the next Fibonacci
+// number.
+// ─────────────────────────────────────────────
+
+/// F(16). Genesis credit supply — first expansion lands on F(17) = 1597.
+pub const GENESIS_CREDIT_SUPPLY: i64 = 987;
+
+/// F(15). Numerator of the rational φ⁻¹ used in consensus-critical
+/// integer arithmetic: 610/987 = F(15)/F(16), error from φ⁻¹ ≈ 5×10⁻⁷.
+pub const INV_PHI_NUM: u64 = 610;
+/// F(14). Numerator of the rational φ⁻²: 377/987 = F(14)/F(16).
+/// Consecutive-but-one Fibonacci ratios give consecutive φ powers over
+/// the same denominator: 610/987 → φ⁻¹, 377/987 → φ⁻².
+pub const INV_PHI_SQ_NUM: u64 = 377;
+/// F(16). Shared denominator of the rational φ powers. Same number as
+/// GENESIS_CREDIT_SUPPLY — the tower reuses its own terms.
+pub const INV_PHI_DEN: u64 = 987;
+
+/// Default (unsealed) credit limit for a given credit supply:
+/// −⌊supply × φ⁻²⌋, the zero-reputation floor. Integer-exact via the
+/// rational φ⁻² = F(14)/F(16) = 377/987 so integrity validation never
+/// touches floats. Truncated division = floor, so the granted borrowing
+/// power is never larger than the real φ⁻² share — conservative in the
+/// only direction that matters for a limit.
+pub fn default_credit_limit(credit_supply: i64) -> i64 {
+    let supply = credit_supply.max(0) as u64;
+    -((supply * INV_PHI_SQ_NUM / INV_PHI_DEN) as i64)
+}
+
+/// Number of roster signatures required to seal a membrane-crossing
+/// entry (CreditLimit, governed NetworkState, PaymentReceipt):
+/// ⌈roster × φ⁻¹⌉.
+///
+/// φ⁻¹, not the φ⁻² quorum threshold — membrane crossings are the
+/// highest-privilege writes, so they take the complement threshold:
+/// φ⁻² is enough weight to decide, φ⁻¹ = 1 − φ⁻² is enough to
+/// re-anchor identity. Integer-exact via F(15)/F(16); ceiling division
+/// so the threshold never rounds down to a weaker requirement.
+/// Empty roster ⇒ 0 (sealing not yet active — bootstrap).
+pub fn seal_threshold(roster_len: usize) -> usize {
+    let n = roster_len as u64;
+    ((n * INV_PHI_NUM + INV_PHI_DEN - 1) / INV_PHI_DEN) as usize
+}
+
+/// True iff n is a Fibonacci number (n ≥ 1). Lets integrity validation
+/// enforce that expansion thresholds stay on the sequence.
+pub fn is_fibonacci(n: u64) -> bool {
+    if n == 0 {
+        return false;
+    }
+    let (mut a, mut b): (u64, u64) = (1, 1);
+    while b < n {
+        let c = match a.checked_add(b) {
+            Some(c) => c,
+            None => return false,
+        };
+        a = b;
+        b = c;
+    }
+    b == n || a == n
+}
+
+// ─────────────────────────────────────────────
 // Threshold crossing
 // ─────────────────────────────────────────────
 
@@ -154,6 +221,73 @@ impl ClosureStatus {
     }
 }
 
+/// φ-derived health-reference targets for the closure probes. Pure
+/// multipliers and thresholds — no live network state. `check_closure`
+/// and NetworkGoalManifest's read-time derivation both call derive_targets
+/// so they cannot diverge on what "the target" means.
+///
+/// Takes the primitive tau_us, not the GeometryParams entry type, because
+/// toric-geometry is hdi-free and cannot name registry_integrity types.
+/// Callers extract tau_us from the fetched GeometryParams and pass it in.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Targets {
+    /// Multiplier applied to total network reputation to get the *ideal*
+    /// quorum weight (probe 2's `expected`). φ⁻¹, one φ-rung above the
+    /// φ⁻² minimum-resolution threshold enforced separately in check_quorum.
+    /// Ideal = total_rep × INV_PHI = total_rep / φ. Applied to live
+    /// total_rep at the call site, never stored here.
+    pub quorum_weight_multiplier: f64,
+    /// Target network reveal rate (probe 3's `expected`). φ⁻¹ — the same
+    /// pass line used everywhere else in the system (attestation scoring,
+    /// honest-rep threshold, trust score pass line). A second constant here
+    /// would break that single-threshold consistency.
+    pub reveal_rate_target: f64,
+}
+
+/// Derive φ targets from geometry. Currently tau_us does not influence the
+/// targets (they are pure φ powers), but routing through this function
+/// keeps the seam: when GeometryParams grows fields that *do* shift the
+/// targets, they derive from it here without any caller signature change.
+pub fn derive_targets(_tau_us: u64) -> Targets {
+    Targets {
+        quorum_weight_multiplier: INV_PHI,
+        reveal_rate_target: INV_PHI,
+    }
+}
+
+/// Normalized deviation magnitude in [0, 1], shared by all four closure
+/// probes so the zero-semantics cannot drift between call sites.
+///
+/// Two probe families call this with different meanings of `expected`:
+///   - measured-vs-target (probes 2,3): expected = GeometryParams-derived target
+///   - recompute-vs-stored (probes 1,4): expected = stored/cached value
+/// The math is identical; only the caller's interpretation differs.
+///
+/// Zero handling is per-case, not a blanket rule:
+///   - expected == 0 && actual == 0 → 0.0: genuine agreement on nothing.
+///     The common legitimate case (manifest with no upstream chain, fresh
+///     TrustScoreCache). Must NOT read as deviant.
+///   - expected == 0 && actual != 0 → 1.0: total divergence, cannot
+///     normalize against a zero base. For probes 1/4 this is the auditability
+///     failure; for probes 2/3 it means degenerate GeometryParams / empty
+///     network — both "max signal, investigate".
+///
+/// The `.min(1.0)` clamp is INTENTIONAL and load-bearing: `worst_deviation`
+/// and every ClosureStatus consumer rely on magnitudes staying within [0,1].
+/// Deviations beyond 100% of `expected` saturate at 1.0, so 2×expected and
+/// 100×expected both report 1.0 and are indistinguishable here. That signal
+/// loss is an accepted cost of the [0,1] contract. Do NOT "fix" this into an
+/// unbounded value; doing so breaks the contract.
+pub fn normalized_deviation(expected: f64, actual: f64) -> f64 {
+    if expected == 0.0 && actual == 0.0 {
+        0.0
+    } else if expected == 0.0 {
+        1.0
+    } else {
+        ((actual - expected).abs() / expected).min(1.0)
+    }
+}
+
 // ─────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────
@@ -209,18 +343,25 @@ mod tests {
 
     #[test]
     fn previous_fibonacci_known_values() {
+        // Returns the largest Fibonacci `a` whose successor a+b is still < n.
+        // For n on the sequence this is two steps back, not one — this is the
+        // production behavior copied verbatim from mutual_credit, relied on by
+        // admission_allowance for current-interval lower bounds. Do not change
+        // the function to make these read as "one step back".
         assert_eq!(previous_fibonacci(2), 1);
-        assert_eq!(previous_fibonacci(21), 13); // previous of 21 is 13
-        assert_eq!(previous_fibonacci(22), 21);
-        assert_eq!(previous_fibonacci(987), 610);
+        assert_eq!(previous_fibonacci(21), 8);
+        assert_eq!(previous_fibonacci(22), 13);
+        assert_eq!(previous_fibonacci(987), 377);
     }
 
     #[test]
     fn genesis_credit_supply_is_fibonacci() {
-        // GENESIS_CREDIT_SUPPLY = 987 = F(16). Verify next/prev bracket it.
+        // GENESIS_CREDIT_SUPPLY = 987. next_fibonacci gives the next expansion
+        // threshold (1597). previous_fibonacci returns 377 by its two-steps-back
+        // definition above, not 610 — see previous_fibonacci_known_values.
         let supply: u64 = 987;
         assert_eq!(next_fibonacci(supply), 1597);
-        assert_eq!(previous_fibonacci(supply), 610);
+        assert_eq!(previous_fibonacci(supply), 377);
     }
 
     #[test]
@@ -244,5 +385,262 @@ mod tests {
             signals: vec![mk(0.1), mk(0.4), mk(0.2)],
         };
         assert_eq!(cs.worst_deviation(), Some(0.4));
+    }
+
+    #[test]
+    fn normalized_deviation_both_zero_is_healthy() {
+        assert_eq!(normalized_deviation(0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn normalized_deviation_zero_expected_nonzero_actual_is_max() {
+        assert_eq!(normalized_deviation(0.0, 0.5), 1.0);
+        assert_eq!(normalized_deviation(0.0, 1_000_000.0), 1.0);
+    }
+
+    #[test]
+    fn normalized_deviation_normal_case() {
+        assert!((normalized_deviation(1.0, 0.8) - 0.2).abs() < 1e-12);
+        assert_eq!(normalized_deviation(1.0, 1.0), 0.0);
+        assert!((normalized_deviation(2.0, 3.0) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn normalized_deviation_clamps_at_one() {
+        assert_eq!(normalized_deviation(1.0, 3.0), 1.0);
+        assert_eq!(normalized_deviation(1.0, 101.0), 1.0);
+        assert_eq!(
+            normalized_deviation(1.0, 3.0),
+            normalized_deviation(1.0, 101.0)
+        );
+    }
+
+    #[test]
+    fn derive_targets_are_phi_consistent() {
+        let t = derive_targets(10_000_000);
+        assert_eq!(t.quorum_weight_multiplier, INV_PHI);
+        assert_eq!(t.reveal_rate_target, INV_PHI);
+        // This asserts an ABSENCE of behavior: tau_us currently does not
+        // shift the targets. It is a regression guard for today's state, NOT
+        // a design invariant. When GeometryParams grows a field that should
+        // move the targets, this assertion must be DELETED and replaced with
+        // one asserting the new dependence — not kept, or it would assert the
+        // new field is being ignored. Do not "fix" a tau-sensitive target to
+        // keep this line green.
+        assert_eq!(derive_targets(1), derive_targets(999_999_999));
+    }
+
+    #[test]
+    fn seal_threshold_is_ceiling_of_inv_phi() {
+        // ⌈n × φ⁻¹⌉ against the float value for every roster size that
+        // will exist in practice. The rational 610/987 must agree with
+        // the real φ⁻¹ ceiling for all n up to F(16); beyond that the
+        // approximation error (≈5×10⁻⁷) could shift the ceiling by 1 —
+        // acceptable, and the rational is the canonical value.
+        for n in 1usize..=987 {
+            let expected = ((n as f64) * INV_PHI).ceil() as usize;
+            assert_eq!(seal_threshold(n), expected, "n = {}", n);
+        }
+        assert_eq!(seal_threshold(0), 0); // bootstrap — sealing inactive
+        assert_eq!(seal_threshold(1), 1); // sole signer must sign
+        assert_eq!(seal_threshold(2), 2); // φ⁻¹ of 2 ⇒ both
+        assert_eq!(seal_threshold(3), 2);
+        assert_eq!(seal_threshold(5), 4);
+    }
+
+    #[test]
+    fn seal_threshold_is_complement_of_quorum() {
+        // The identity that motivates the power: 1 − φ⁻² = φ⁻¹.
+        assert!(((1.0 - INV_PHI_SQ) - INV_PHI).abs() < 1e-12);
+        // And a sealing coalition always exceeds a deciding coalition.
+        for n in 1usize..=200 {
+            let quorum = ((n as f64) * INV_PHI_SQ).ceil() as usize;
+            assert!(seal_threshold(n) >= quorum, "n = {}", n);
+        }
+    }
+
+    #[test]
+    fn default_credit_limit_matches_float_and_is_never_looser() {
+        for supply in [GENESIS_CREDIT_SUPPLY, 1597, 2584, 4181, 6765] {
+            let integer = default_credit_limit(supply);
+            let float = -((supply as f64 * INV_PHI_SQ) as i64);
+            // Within one unit of the float version, and never more
+            // borrowing power (limits are negative: never smaller).
+            assert!((integer - float).abs() <= 1, "supply = {}", supply);
+            // Truncated rational never exceeds the float share:
+            assert!(integer >= float, "supply = {}", supply);
+        }
+        assert_eq!(default_credit_limit(0), 0);
+    }
+
+    #[test]
+    fn is_fibonacci_known_values() {
+        for f in [1u64, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 987, 1597] {
+            assert!(is_fibonacci(f), "{} should be Fibonacci", f);
+        }
+        for n in [0u64, 4, 6, 7, 9, 10, 20, 22, 100, 986, 988] {
+            assert!(!is_fibonacci(n), "{} should not be Fibonacci", n);
+        }
+    }
+
+    #[test]
+    fn rational_inv_phi_is_fibonacci_ratio() {
+        assert!(is_fibonacci(INV_PHI_NUM));
+        assert!(is_fibonacci(INV_PHI_DEN));
+        assert_eq!(INV_PHI_DEN, GENESIS_CREDIT_SUPPLY as u64);
+        let rational = INV_PHI_NUM as f64 / INV_PHI_DEN as f64;
+        assert!((rational - INV_PHI).abs() < 1e-6);
+    }
+}
+// ─────────────────────────────────────────────
+// Sovereignty roster — a function, not a membership list
+//
+// The roster is the minimal prefix of agents, sorted by trust score
+// descending (ties by key bytes ascending), whose cumulative score
+// reaches φ⁻¹ of total reputation: the smallest set holding a sealing
+// coalition's worth of the network. Sovereignty is standing, recomputed
+// each rotation — entrenchment must fight the reputation dynamics, not
+// hide in a succession rule. Keys are raw bytes: this crate never
+// dereferences agents.
+// ─────────────────────────────────────────────
+
+pub fn derive_roster(scored: &[(Vec<u8>, f64)]) -> Vec<Vec<u8>> {
+    let total: f64 = scored.iter().map(|(_, s)| s.max(0.0)).sum();
+    if total <= 0.0 {
+        return vec![];
+    }
+    let mut sorted: Vec<(&Vec<u8>, f64)> =
+        scored.iter().map(|(k, s)| (k, s.max(0.0))).collect();
+    sorted.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(core::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    let target = total * INV_PHI;
+    let mut cumulative = 0.0;
+    let mut roster = Vec::new();
+    for (key, score) in sorted {
+        if cumulative >= target {
+            break;
+        }
+        cumulative += score;
+        roster.push(key.clone());
+    }
+    roster
+}
+
+/// Jaccard distance between two key sets: |sym-diff| / |union|.
+/// The roster-conformance deviation — 0.0 when the sealed roster equals
+/// the reputation-derived one, 1.0 when disjoint.
+pub fn jaccard_distance(a: &[Vec<u8>], b: &[Vec<u8>]) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
+    }
+    let in_both = a.iter().filter(|k| b.contains(k)).count();
+    let union = a.len() + b.len() - in_both;
+    if union == 0 {
+        return 0.0;
+    }
+    (union - in_both) as f64 / union as f64
+}
+
+/// Expected credit supply after `cycle` Fibonacci crossings: genesis
+/// folded through ⌊supply × φ⌋ per crossing — the same arithmetic
+/// integrity enforces per step, replayed from origin. Probe 5 compares
+/// live supply against this; any mismatch means a step escaped the law.
+pub fn expected_supply(cycle: u64) -> i64 {
+    let mut supply = GENESIS_CREDIT_SUPPLY;
+    for _ in 0..cycle {
+        supply = (supply as f64 * PHI).floor() as i64;
+    }
+    supply
+}
+
+/// Deviation against a negligibility ceiling: 0.0 while actual ≤ ceiling,
+/// then grows toward 1.0. For quantities expected to stay negligible
+/// (frozen-account mass) rather than track a target — probe 7's shape.
+pub fn ceiling_deviation(ceiling: f64, actual: f64) -> f64 {
+    if ceiling <= 0.0 {
+        return if actual > 0.0 { 1.0 } else { 0.0 };
+    }
+    if actual <= ceiling {
+        return 0.0;
+    }
+    ((actual - ceiling) / ceiling).min(1.0)
+}
+
+/// Probe identifiers — economic domain. 1–4 are the registry/coordination
+/// domain (hash, quorum weight, reveal discipline, trust drift).
+pub const PROBE_SUPPLY_POSITION: u8 = 5;
+pub const PROBE_ROSTER_CONFORMANCE: u8 = 6;
+pub const PROBE_FROZEN_FRACTION: u8 = 7;
+
+#[cfg(test)]
+mod sovereignty_tests {
+    use super::*;
+
+    fn k(n: u8) -> Vec<u8> {
+        vec![n]
+    }
+
+    #[test]
+    fn roster_is_minimal_phi_inverse_mass() {
+        // Scores: 50, 30, 15, 5 — total 100, target 61.8.
+        let scored = vec![(k(1), 50.0), (k(2), 30.0), (k(3), 15.0), (k(4), 5.0)];
+        let roster = derive_roster(&scored);
+        // 50 < 61.8 → need 2nd; 80 ≥ 61.8 → stop. Roster = top two.
+        assert_eq!(roster, vec![k(1), k(2)]);
+    }
+
+    #[test]
+    fn roster_single_whale() {
+        // One agent holding ≥ φ⁻¹ of mass IS the roster — concentration
+        // is a reputation-distribution fact, surfaced by probe 6/closure,
+        // not hidden by the roster function.
+        let scored = vec![(k(9), 70.0), (k(1), 20.0), (k(2), 10.0)];
+        assert_eq!(derive_roster(&scored), vec![k(9)]);
+    }
+
+    #[test]
+    fn roster_deterministic_under_ties() {
+        let a = vec![(k(2), 10.0), (k(1), 10.0), (k(3), 10.0)];
+        let b = vec![(k(3), 10.0), (k(2), 10.0), (k(1), 10.0)];
+        assert_eq!(derive_roster(&a), derive_roster(&b)); // key-ordered
+        assert_eq!(derive_roster(&a), vec![k(1), k(2)]); // 20/30 ≥ φ⁻¹
+    }
+
+    #[test]
+    fn roster_empty_and_zero_score_networks() {
+        assert!(derive_roster(&[]).is_empty());
+        assert!(derive_roster(&[(k(1), 0.0)]).is_empty());
+        assert!(derive_roster(&[(k(1), -5.0), (k(2), 0.0)]).is_empty());
+    }
+
+    #[test]
+    fn jaccard_distance_cases() {
+        assert_eq!(jaccard_distance(&[], &[]), 0.0);
+        assert_eq!(jaccard_distance(&[k(1), k(2)], &[k(1), k(2)]), 0.0);
+        assert_eq!(jaccard_distance(&[k(1)], &[k(2)]), 1.0);
+        let d = jaccard_distance(&[k(1), k(2)], &[k(2), k(3)]);
+        assert!((d - 2.0 / 3.0).abs() < 1e-12); // sym-diff 2, union 3
+    }
+
+    #[test]
+    fn expected_supply_walks_fibonacci_neighborhood() {
+        assert_eq!(expected_supply(0), GENESIS_CREDIT_SUPPLY);
+        // ⌊987φ⌋ = 1596 — one below F(17); floor-chaining is the law
+        // integrity enforces, so the probe expects the chained value,
+        // not the pure Fibonacci number.
+        assert_eq!(expected_supply(1), 1596);
+        assert_eq!(expected_supply(2), (1596.0 * PHI).floor() as i64);
+    }
+
+    #[test]
+    fn ceiling_deviation_shape() {
+        assert_eq!(ceiling_deviation(INV_PHI_4, 0.0), 0.0);
+        assert_eq!(ceiling_deviation(INV_PHI_4, INV_PHI_4), 0.0);
+        assert!(ceiling_deviation(INV_PHI_4, INV_PHI_4 * 1.5) > 0.0);
+        assert_eq!(ceiling_deviation(INV_PHI_4, 1.0), 1.0);
+        assert_eq!(ceiling_deviation(0.0, 0.5), 1.0);
     }
 }

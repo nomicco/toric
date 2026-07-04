@@ -2,12 +2,12 @@ manifest_version: '0'
 name: toric
 description: null
 roles:
-- name: registry
+- name: ledger
   provisioning:
     strategy: create
     deferred: false
   dna:
-    path: ../dnas/registry/workdir/registry.dna
+    path: ../dnas/ledger/workdir/ledger.dna
     modifiers:
       network_seed: "toric-v1"
       properties: null
@@ -19,17 +19,6 @@ roles:
     deferred: false
   dna:
     path: ../dnas/coordination/workdir/coordination.dna
-    modifiers:
-      network_seed: "toric-v1"
-      properties: null
-    installed_hash: null
-    clone_limit: 0
-- name: mutual_credit
-  provisioning:
-    strategy: create
-    deferred: false
-  dna:
-    path: ../dnas/mutual_credit/workdir/mutual_credit.dna
     modifiers:
       network_seed: "toric-v1"
       properties: null

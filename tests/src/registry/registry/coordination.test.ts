@@ -79,8 +79,7 @@ async function checkQuorum(
     fn_name: "check_quorum",
     payload: {
       request_hash: requestHash,
-      registry_dna_hash: registryCell.cell_id[0],
-      mutual_credit_dna_hash: mcCell.cell_id[0],
+      ledger_dna_hash: registryCell.cell_id[0],
     }
   });
 }
@@ -94,7 +93,7 @@ test("request validation — creates a ValidationRequest entry", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     assert.ok(manifestHash);
 
     const requestHash = await requestValidation(
@@ -110,7 +109,7 @@ test("submit evaluation — validator can submit verdict", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     const requestHash = await requestValidation(
       alice.namedCells.get("coordination")!,
       manifestHash
@@ -131,7 +130,7 @@ test("check quorum — single evaluation returns not reached", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     const requestHash = await requestValidation(
       alice.namedCells.get("coordination")!,
       manifestHash
@@ -149,8 +148,8 @@ test("check quorum — single evaluation returns not reached", async () => {
     const result = await checkQuorum(
       alice.namedCells.get("coordination")!,
       requestHash,
-      alice.namedCells.get("registry")!,
-      alice.namedCells.get("mutual_credit")!
+      alice.namedCells.get("ledger")!,
+      alice.namedCells.get("ledger")!
     );
 
     assert.equal(result.reached, false);
@@ -165,7 +164,7 @@ test("check quorum — three validators agreeing reaches quorum", async () => {
     const carol = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     await sleep(2000);
 
     const requestHash = await requestValidation(
@@ -184,8 +183,8 @@ test("check quorum — three validators agreeing reaches quorum", async () => {
     const result = await checkQuorum(
       alice.namedCells.get("coordination")!,
       requestHash,
-      alice.namedCells.get("registry")!,
-      alice.namedCells.get("mutual_credit")!
+      alice.namedCells.get("ledger")!,
+      alice.namedCells.get("ledger")!
     );
 
     assert.equal(result.reached, true);
@@ -201,7 +200,7 @@ test("duplicate quorum bundle — calling check_quorum twice produces only one b
     const carol = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     await sleep(2000);
 
     const requestHash = await requestValidation(
@@ -220,8 +219,8 @@ test("duplicate quorum bundle — calling check_quorum twice produces only one b
     const result1 = await checkQuorum(
       alice.namedCells.get("coordination")!,
       requestHash,
-      alice.namedCells.get("registry")!,
-      alice.namedCells.get("mutual_credit")!
+      alice.namedCells.get("ledger")!,
+      alice.namedCells.get("ledger")!
     );
     assert.equal(result1.reached, true);
     assert.ok(result1.quorum_bundle_hash);
@@ -231,8 +230,8 @@ test("duplicate quorum bundle — calling check_quorum twice produces only one b
     const result2 = await checkQuorum(
       alice.namedCells.get("coordination")!,
       requestHash,
-      alice.namedCells.get("registry")!,
-      alice.namedCells.get("mutual_credit")!
+      alice.namedCells.get("ledger")!,
+      alice.namedCells.get("ledger")!
     );
     assert.equal(result2.reached, true);
     assert.ok(result2.quorum_bundle_hash);
@@ -247,8 +246,8 @@ test("duplicate quorum bundle — calling check_quorum twice produces only one b
     const result3 = await checkQuorum(
       bob.namedCells.get("coordination")!,
       requestHash,
-      bob.namedCells.get("registry")!,
-      bob.namedCells.get("mutual_credit")!
+      bob.namedCells.get("ledger")!,
+      bob.namedCells.get("ledger")!
     )
     assert.equal(result3.reached, true);
     const hash3 = Buffer.from(result3.quorum_bundle_hash).toString("base64url");
@@ -262,7 +261,7 @@ test("get pending requests — agent can query their requests", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     await requestValidation(alice.namedCells.get("coordination")!, manifestHash);
     await requestValidation(alice.namedCells.get("coordination")!, manifestHash);
 
@@ -283,7 +282,7 @@ test("commit evaluation — validator can commit a verdict", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     const requestHash = await requestValidation(
       alice.namedCells.get("coordination")!,
       manifestHash
@@ -309,7 +308,7 @@ test("reveal window — opens after φ⁴ threshold crossed", async () => {
     const carol = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     await sleep(2000);
 
     const requestHash = await requestValidation(
@@ -334,8 +333,7 @@ test("reveal window — opens after φ⁴ threshold crossed", async () => {
       fn_name: "check_reveal_window",
       payload: {
         request_hash: requestHash,
-        registry_dna_hash: alice.namedCells.get("registry")!.cell_id[0],
-        mutual_credit_dna_hash: alice.namedCells.get("mutual_credit")!.cell_id[0],
+        ledger_dna_hash: alice.namedCells.get("ledger")!.cell_id[0],
       },
     });
 
@@ -349,7 +347,7 @@ test("reveal evaluation — requires prior commitment", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     const requestHash = await requestValidation(
       alice.namedCells.get("coordination")!,
       manifestHash
@@ -382,7 +380,7 @@ test("full commit-reveal flow — three validators reach quorum", async () => {
     const carol = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     await sleep(2000);
 
     const requestHash = await requestValidation(
@@ -427,7 +425,7 @@ test("full commit-reveal flow — three validators reach quorum", async () => {
           score: 0.95,
           details: "test",
           salt,
-          registry_dna_hash: player.namedCells.get("registry")!.cell_id[0],
+          ledger_dna_hash: player.namedCells.get("ledger")!.cell_id[0],
         }
       })
     ));
@@ -437,8 +435,8 @@ test("full commit-reveal flow — three validators reach quorum", async () => {
     const result = await checkQuorum(
       alice.namedCells.get("coordination")!,
       requestHash,
-      alice.namedCells.get("registry")!,
-      alice.namedCells.get("mutual_credit")!
+      alice.namedCells.get("ledger")!,
+      alice.namedCells.get("ledger")!
     );
 
     assert.equal(result.reached, true);
@@ -454,7 +452,7 @@ test("commit deadline — reveal after deadline is rejected", async () => {
     const carol = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     await sleep(2000);
 
     const requestHash = await requestValidation(
@@ -486,8 +484,7 @@ test("commit deadline — reveal after deadline is rejected", async () => {
       fn_name: "check_reveal_window",
       payload: {
         request_hash: requestHash,
-        registry_dna_hash: alice.namedCells.get("registry")!.cell_id[0],
-        mutual_credit_dna_hash: alice.namedCells.get("mutual_credit")!.cell_id[0],
+        ledger_dna_hash: alice.namedCells.get("ledger")!.cell_id[0],
       }
     });
 
@@ -500,7 +497,7 @@ test("ManifestToRequest link — validation history queryable from manifest", as
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     await sleep(500);
 
     await requestValidation(alice.namedCells.get("coordination")!, manifestHash);
@@ -522,7 +519,7 @@ test("ValidationEvidence — record_evidence creates retrievable entry", async (
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const manifestHash = await createManifest(alice.namedCells.get("registry")!);
+    const manifestHash = await createManifest(alice.namedCells.get("ledger")!);
     await sleep(5000);
 
     const evidenceHash: ActionHash = await alice.namedCells.get("coordination")!.callZome({

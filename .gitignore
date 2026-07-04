@@ -6,31 +6,41 @@
 .DS_Store
 
 # build
-/dist/
+dist/
 /target/
 /.cargo/
+out/
 
-# package manager
-/**/node_modules/
+# package managers
+node_modules/
 /.yarn
 
-# generated and compiled files
+# generated and compiled artifacts
 *.happ
 *.webhapp
 *.zip
 *.dna
+*.wasm
+repomix-output.xml
+*repomix*.xml
 
-# temporary files
+# holochain sandboxes and runtime state
 .hc*
 .running
-.hc
-
-# large binaries — never commit these
-holochain-bin
-holochain-nix-closure.tar.gz
-holochain-nix-closure-full.tar.gz
-src-tauri/holochain-bin
-src-tauri/holochain-nix-closure.tar.gz
-*.tar.gz
-
 /data/
+
+# desktop app (Kangaroo) local state
+toric-desktop/node_modules/
+toric-desktop/out/
+toric-desktop/dist/
+toric-desktop/resources/bins/
+
+# secrets and keys — never commit
+*.pem
+*.key
+**/keystore/
+**/lair-keystore-config.yaml
+
+# large binaries
+holochain-bin
+*.tar.gztoric-desktop/

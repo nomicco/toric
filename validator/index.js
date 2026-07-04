@@ -61,8 +61,8 @@ async function connectConductor() {
 
   const appInfo = await adminWs.listApps({ status_filter: 'enabled' });
   const app = appInfo.find(a => a.installed_app_id === APP_ID);
-  const registryCell  = app.cell_info['registry'][0].value;
-  const mcCell        = app.cell_info['mutual_credit'][0].value;
+  const registryCell  = app.cell_info["ledger"][0].value;
+  const mcCell        = app.cell_info["ledger"][0].value;
 
   const appWs = await AppWebsocket.connect({
     url: new URL(`ws://localhost:${APP_PORT}`),
@@ -508,16 +508,16 @@ async function processRequest(request, agent) {
   try {
     const { appWs, registryCell, mcCell } = conductorClient;
     const appInfo = await appWs.appInfo();
-    const registryDnaHash = registryCell.cell_id[0];
     const agentPubKey = registryCell.cell_id[1];
 
+    // Merged ledger DNA: registry is a sibling zome — the extern no
+    // longer takes a DNA hash. The bridge-hash bug died with the bridge.
     const hash = await appWs.callZome({
       cell_id: mcCell.cell_id,
       zome_name: 'mutual_credit',
       fn_name: 'update_credit_limit',
       payload: {
         agent: agentPubKey,
-        registry_dna_hash: registryDnaHash,
       },
       provenance: mcCell.cell_id[1],
     });

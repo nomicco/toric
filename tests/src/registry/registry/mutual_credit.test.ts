@@ -17,7 +17,7 @@ test("create an account", async () => {
   await runScenario(async (scenario: Scenario) => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
-    const cell = alice.namedCells.get("mutual_credit")!;
+    const cell = alice.namedCells.get("ledger")!;
     const metadata = new Uint8Array(0);
     const accountHash: ActionHash = await cell.callZome({ zome_name: "mutual_credit", fn_name: "create_account", payload: { metadata_blob: metadata } });
     assert.ok(accountHash);
@@ -28,7 +28,7 @@ test("get balance — new account starts at zero with φ-derived limit", async (
   await runScenario(async (scenario: Scenario) => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
-    const cell = alice.namedCells.get("mutual_credit")!;
+    const cell = alice.namedCells.get("ledger")!;
     const metadata = new Uint8Array(0);
     await cell.callZome({ zome_name: "mutual_credit", fn_name: "create_account", payload: { metadata_blob: metadata } });
     const balance = await cell.callZome({ zome_name: "mutual_credit", fn_name: "get_balance", payload: { agent: alice.agentPubKey } });
@@ -43,8 +43,8 @@ test("transact — credits move between agents", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     const bob = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
-    const aliceCell = alice.namedCells.get("mutual_credit")!;
-    const bobCell = bob.namedCells.get("mutual_credit")!;
+    const aliceCell = alice.namedCells.get("ledger")!;
+    const bobCell = bob.namedCells.get("ledger")!;
     const metadata = new Uint8Array(0);
     await aliceCell.callZome({ zome_name: "mutual_credit", fn_name: "create_account", payload: { metadata_blob: metadata } });
     await bobCell.callZome({ zome_name: "mutual_credit", fn_name: "create_account", payload: { metadata_blob: metadata } });
@@ -72,7 +72,7 @@ test("transaction exceeding credit limit is rejected", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     const bob = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
-    const aliceCell = alice.namedCells.get("mutual_credit")!;
+    const aliceCell = alice.namedCells.get("ledger")!;
     const metadata = new Uint8Array(0);
     await aliceCell.callZome({ zome_name: "mutual_credit", fn_name: "create_account", payload: { metadata_blob: metadata } });
     try {
@@ -89,7 +89,7 @@ test("zero or negative amount transaction is rejected", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     const bob = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
-    const aliceCell = alice.namedCells.get("mutual_credit")!;
+    const aliceCell = alice.namedCells.get("ledger")!;
     const metadata = new Uint8Array(0);
     await aliceCell.callZome({ zome_name: "mutual_credit", fn_name: "create_account", payload: { metadata_blob: metadata } });
     try {
@@ -106,8 +106,8 @@ test("sum-zero invariant — total credits in system stay balanced", async () =>
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     const bob = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
-    const aliceCell = alice.namedCells.get("mutual_credit")!;
-    const bobCell = bob.namedCells.get("mutual_credit")!;
+    const aliceCell = alice.namedCells.get("ledger")!;
+    const bobCell = bob.namedCells.get("ledger")!;
     const metadata = new Uint8Array(0);
     await aliceCell.callZome({ zome_name: "mutual_credit", fn_name: "create_account", payload: { metadata_blob: metadata } });
     await bobCell.callZome({ zome_name: "mutual_credit", fn_name: "create_account", payload: { metadata_blob: metadata } });
@@ -137,7 +137,7 @@ test("genesis phase — account creation always allowed before first threshold",
     await scenario.shareAllAgents();
 
     const metadata = new Uint8Array(0);
-    const accountHash = await alice.namedCells.get("mutual_credit")!.callZome({
+    const accountHash = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "mutual_credit",
       fn_name: "create_account",
       payload: { metadata_blob: metadata },
@@ -152,7 +152,7 @@ test("network state — phase starts at 0", async () => {
     const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
     await scenario.shareAllAgents();
 
-    const state = await alice.namedCells.get("mutual_credit")!.callZome({
+    const state = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "mutual_credit",
       fn_name: "get_network_state",
       payload: null,
@@ -178,7 +178,7 @@ test("admission allowance — opens proportionally to cycle progress", async () 
     const metadata = new Uint8Array(0);
 
     // First account — no state, always allowed
-    const hash1 = await alice.namedCells.get("mutual_credit")!.callZome({
+    const hash1 = await alice.namedCells.get("ledger")!.callZome({
       zome_name: "mutual_credit",
       fn_name: "create_account",
       payload: { metadata_blob: metadata },
