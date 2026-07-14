@@ -43,8 +43,9 @@
 
 use hdi::prelude::*;
 use toric_geometry::{
-    default_credit_limit, is_fibonacci, next_fibonacci, seal_threshold,
-    GENESIS_CREDIT_SUPPLY,
+    credit_limit_for_reputation, default_credit_limit, is_fibonacci,
+    mass_seal_threshold, next_fibonacci,
+    roster_expired, GENESIS_CREDIT_SUPPLY,
 };
 
 // ─────────────────────────────────────────────
@@ -61,6 +62,19 @@ pub const SEAL_DOMAIN_TRANSACTION: &str = "toric.seal.transaction.v1";
 // ─────────────────────────────────────────────
 // The seal and its payloads
 // ─────────────────────────────────────────────
+
+/// One seat of the sovereignty roster: an agent and its integer
+/// reputation mass at derivation time. Sealing is MASS-weighted —
+/// membership and sealing speak the same base (item 2's fix: head-count
+/// sealing let seat-majority diverge from mass-majority; thirteen tail
+/// seats could seal with ~21% of mass). The mass scale cancels in every
+/// threshold check (ratios over the same vector): representation, not
+/// a parameter.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RosterSeat {
+    pub agent: AgentPubKey,
+    pub mass: u64,
+}
 
 /// Quorum countersignature carried by membrane-crossing entries.
 ///
@@ -86,6 +100,31 @@ pub struct CreditLimitPayload {
     pub attested_balance: i64,
     pub reputation_score: u32,
     pub cycle: u64,
+    /// Merge dividend: the registry ReputationCache the quorum
+    /// evaluated, cited by hash so what was attested is pinned to a
+    /// permanent record. APPENDED (never reorder — field order is the
+    /// wire format); #[serde(default)] keeps pre-dividend payload
+    /// bytes decodable.
+    #[serde(default)]
+    pub reputation_basis: Option<ActionHash>,
+}
+
+/// Decode-shape mirror of registry_integrity::ReputationCache — same
+/// field names and types, so msgpack decodes iff the cited entry is
+/// shaped like a ReputationCache. A shape check rather than a
+/// zome-index check: cross-zome entry-type indexes depend on dna.yaml
+/// ordering and are brittler than the shape. Kept in sync with the
+/// registry struct by the merge-dividend tryorama scenario.
+#[derive(Serialize, Deserialize, Debug, SerializedBytes)]
+pub struct ReputationCacheView {
+    pub agent: AgentPubKey,
+    pub score: u32,
+    pub score_delta: i32,
+    pub computed_at: Timestamp,
+    pub attestation_count: u32,
+    pub warrant_count: u32,
+    pub total_commits: u32,
+    pub total_reveals: u32,
 }
 
 /// What roster members sign for a governed NetworkState write.
@@ -100,7 +139,12 @@ pub struct NetworkStatePayload {
     pub credit_supply: i64,
     pub cycle: u64,
     pub phase: u8,
-    pub authorized_signers: Vec<AgentPubKey>,
+    pub authorized_signers: Vec<RosterSeat>,
+    /// Round at which this roster takes (or took) office — sealed so
+    /// lease arithmetic cannot be forged. `#[serde(default)]` keeps
+    /// pre-lease signatures decodable; new payloads always carry it.
+    #[serde(default)]
+    pub roster_declared_at: u64,
 }
 
 /// What roster members sign for a PaymentReceipt: the attested external
@@ -188,6 +232,17 @@ pub struct CreditLimit {
     /// (see validate_create_credit_limit). Some ⇒ full seal check.
     #[serde(default)]
     pub seal: Option<QuorumSeal>,
+    /// Merge dividend: hash of the registry ReputationCache this limit
+    /// was computed from (same DHT since the merge — must_get-able in
+    /// validation). Required on the sealed path. BINDING, not proof:
+    /// the cache's score value cannot itself be law-validated (it is a
+    /// function of the agent's complete attestation/warrant set, and
+    /// completeness is not provable in deterministic validation — the
+    /// enumeration impossibility that is the reason seals exist). The
+    /// citation pins WHAT the quorum attested to a permanent record,
+    /// checkable by probes and warrantable after the fact.
+    #[serde(default)]
+    pub reputation_basis: Option<ActionHash>,
     pub metadata_blob: SerializedBytes,
 }
 
@@ -199,14 +254,23 @@ pub struct NetworkState {
     pub credit_supply: i64,
     pub cycle: u64,
     pub phase: u8,
-    /// The sovereignty roster. Empty ⇒ sealing not yet active
-    /// (bootstrap). Once non-empty, every successor state requires a
-    /// seal by the *previous* roster — sovereignty is a chain.
+    /// The sovereignty roster with per-seat reputation mass. Empty ⇒
+    /// sealing not yet active (bootstrap). Once non-empty, every
+    /// successor state requires a mass-weighted seal by the *previous*
+    /// roster — sovereignty is a chain.
     #[serde(default)]
-    pub authorized_signers: Vec<AgentPubKey>,
+    pub authorized_signers: Vec<RosterSeat>,
     /// Succession pointer. None only at genesis (attestation_count ≤ 1).
     #[serde(default)]
     pub prev_state_hash: Option<ActionHash>,
+    /// The attestation round at which the sitting roster was declared
+    /// or last rotated/acceded. Sovereignty is a lease: past
+    /// SOVEREIGNTY_LEASE_ROUNDS from this mark, the roster is
+    /// constitutionally expired and the derived roster may accede by
+    /// self-ratification. Carried unchanged through attestation
+    /// successions; reset by every roster change.
+    #[serde(default)]
+    pub roster_declared_at: u64,
     #[serde(default)]
     pub seal: Option<QuorumSeal>,
 }
@@ -288,12 +352,15 @@ fn get_anchor_state(anchor: &ActionHash) -> ExternResult<Result<NetworkState, Va
     }
 }
 
-/// Verifies a QuorumSeal against a roster: signer legitimacy, threshold,
-/// and every signature over the given payload bytes. Deterministic —
-/// `verify_signature` is pure crypto, the roster arrived via `must_get`.
+/// Verifies a QuorumSeal against a roster: signer legitimacy, MASS
+/// threshold, and every signature over the given payload bytes.
+/// Deterministic — `verify_signature` is pure crypto, the roster (with
+/// its per-seat masses) arrived via `must_get`. Signatures must carry
+/// ⌈φ⁻¹ of the roster's total mass⌉: sealing speaks the same base as
+/// membership, so seat-majority can never substitute for mass-majority.
 fn verify_seal(
     seal: &QuorumSeal,
-    roster: &[AgentPubKey],
+    roster: &[RosterSeat],
     payload_bytes: Vec<u8>,
 ) -> ExternResult<ValidateCallbackResult> {
     if roster.is_empty() {
@@ -307,28 +374,29 @@ fn verify_seal(
             "Seal signer/signature count mismatch".into(),
         ));
     }
-    // Dedup — a signer counts once toward threshold.
+    // Dedup — a signer's mass counts once toward threshold.
     let mut seen: Vec<&AgentPubKey> = Vec::with_capacity(seal.signers.len());
+    let mut signed_mass: u64 = 0;
     for signer in &seal.signers {
         if seen.contains(&signer) {
             return Ok(ValidateCallbackResult::Invalid(
                 "Duplicate signer in seal".into(),
             ));
         }
-        if !roster.contains(signer) {
+        let Some(seat) = roster.iter().find(|seat| &seat.agent == signer) else {
             return Ok(ValidateCallbackResult::Invalid(
                 "Seal signer not in the anchor roster".into(),
             ));
-        }
+        };
+        signed_mass = signed_mass.saturating_add(seat.mass);
         seen.push(signer);
     }
-    let required = seal_threshold(roster.len());
-    if seal.signers.len() < required {
+    let total_mass: u64 = roster.iter().map(|seat| seat.mass).sum();
+    let required = mass_seal_threshold(total_mass);
+    if signed_mass < required {
         return Ok(ValidateCallbackResult::Invalid(format!(
-            "Seal has {} signatures; roster of {} requires {} (⌈n·φ⁻¹⌉)",
-            seal.signers.len(),
-            roster.len(),
-            required
+            "Seal carries {} mass; roster total {} requires {} (⌈mass·φ⁻¹⌉)",
+            signed_mass, total_mass, required
         )));
     }
     for (signer, signature) in seal.signers.iter().zip(seal.signatures.iter()) {
@@ -614,6 +682,65 @@ fn validate_create_credit_limit(
                     cl.limit, ceiling, anchor.credit_supply
                 )));
             }
+            // Merge dividend, part 1 — the limit ARITHMETIC is law, not
+            // attestation. Given the attested score and the anchored
+            // supply, the limit is recomputed here and must match
+            // exactly. The quorum attests FACTS (score, balance); the
+            // score→limit mapping is no longer theirs to assert — a
+            // captured or buggy quorum cannot grant an off-curve limit.
+            // Same integer-exact function the coordinator computes with;
+            // one definition, imported by both, or this check IS a fork.
+            let derived = credit_limit_for_reputation(cl.reputation_score, anchor.credit_supply);
+            if cl.limit != derived {
+                return Ok(ValidateCallbackResult::Invalid(format!(
+                    "Sealed limit {} ≠ geometry-derived limit {} for score {} at supply {} — limits are computed by law, not granted",
+                    cl.limit, derived, cl.reputation_score, anchor.credit_supply
+                )));
+            }
+            // Merge dividend, part 2 — the basis citation. must_get the
+            // cited registry entry (same DHT since the merge) and hold
+            // the seal to it: agent and score must match the record the
+            // quorum claims to have evaluated. Binding, not proof — see
+            // the field's doc comment for the honest scope.
+            let Some(basis_hash) = cl.reputation_basis.clone() else {
+                return Ok(ValidateCallbackResult::Invalid(
+                    "Sealed CreditLimit must cite its reputation basis (registry ReputationCache hash)".into(),
+                ));
+            };
+            let basis_record = must_get_valid_record(basis_hash)?;
+            let Some(basis_entry) = basis_record.entry().as_option() else {
+                return Ok(ValidateCallbackResult::Invalid(
+                    "Cited reputation basis record carries no entry".into(),
+                ));
+            };
+            let view: ReputationCacheView = match basis_entry {
+                Entry::App(bytes) => {
+                    match ReputationCacheView::try_from(SerializedBytes::from(bytes.clone())) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            return Ok(ValidateCallbackResult::Invalid(
+                                "Cited reputation basis does not decode as a ReputationCache".into(),
+                            ))
+                        }
+                    }
+                }
+                _ => {
+                    return Ok(ValidateCallbackResult::Invalid(
+                        "Cited reputation basis is not an app entry".into(),
+                    ))
+                }
+            };
+            if view.agent != cl.agent {
+                return Ok(ValidateCallbackResult::Invalid(
+                    "Cited reputation basis belongs to a different agent".into(),
+                ));
+            }
+            if view.score != cl.reputation_score {
+                return Ok(ValidateCallbackResult::Invalid(format!(
+                    "Sealed reputation_score {} disagrees with the cited basis's score {}",
+                    cl.reputation_score, view.score
+                )));
+            }
             let payload = CreditLimitPayload {
                 domain: SEAL_DOMAIN_CREDIT_LIMIT.into(),
                 dna_hash: dna_info()?.hash,
@@ -623,6 +750,7 @@ fn validate_create_credit_limit(
                 attested_balance: cl.attested_balance,
                 reputation_score: cl.reputation_score,
                 cycle: cl.cycle,
+                reputation_basis: cl.reputation_basis.clone(),
             };
             verify_seal(seal, &anchor.authorized_signers, payload_bytes(payload)?)
         }
@@ -715,6 +843,12 @@ fn validate_create_network_state(
                 "Rotation state changes nothing — a no-op succession is noise".into(),
             ));
         }
+        if state.roster_declared_at != state.attestation_count {
+            return Ok(ValidateCallbackResult::Invalid(
+                "Roster changes must stamp roster_declared_at with the current round — the lease clock starts at accession"
+                    .into(),
+            ));
+        }
         return validate_roster_succession(action, state, prev, prev_hash);
     }
     if state.attestation_count != prev.attestation_count + 1 {
@@ -758,6 +892,15 @@ fn validate_create_network_state(
             ));
         }
     }
+    // Attestation successions never touch the lease clock.
+    if state.roster_declared_at != prev.roster_declared_at
+        || state.authorized_signers != prev.authorized_signers
+    {
+        return Ok(ValidateCallbackResult::Invalid(
+            "Attestation succession must carry the roster and its lease mark unchanged — roster changes are rotation or accession states"
+                .into(),
+        ));
+    }
 
     validate_roster_succession(action, state, prev, prev_hash)
 }
@@ -784,6 +927,11 @@ fn validate_roster_succession(
                         ));
                     }
                 }
+                if state.roster_declared_at != state.attestation_count {
+                    return Ok(ValidateCallbackResult::Invalid(
+                        "Roster declaration must stamp roster_declared_at with the current round".into(),
+                    ));
+                }
                 Ok(ValidateCallbackResult::Valid)
             }
             (Some(_), _) => Ok(ValidateCallbackResult::Invalid(
@@ -791,7 +939,17 @@ fn validate_roster_succession(
             )),
         }
     } else {
-        // Governed: every successor is sealed by the PREVIOUS roster.
+        // Governed: successors are sealed by the PREVIOUS roster while
+        // its lease runs. Past the lease the roster is constitutionally
+        // expired, and the successor may instead be sealed by the NEW
+        // roster — accession by self-ratification. Expiry never
+        // invalidates the old roster's seal (a live roster past its
+        // lease can still rotate normally): expiry adds an authority,
+        // it never removes one. Capture analysis: acceding requires
+        // honest signers, and honest sign_network_state only signs the
+        // reputation-derived roster — so accession still requires being
+        // the top-φ⁻¹ reputation mass, which is the front door. DoSing
+        // the old roster changes who can act, never who qualifies.
         let Some(seal) = &state.seal else {
             return Ok(ValidateCallbackResult::Invalid(
                 "Governed NetworkState (predecessor has a roster) requires a quorum seal".into(),
@@ -813,8 +971,24 @@ fn validate_roster_succession(
             cycle: state.cycle,
             phase: state.phase,
             authorized_signers: state.authorized_signers.clone(),
+            roster_declared_at: state.roster_declared_at,
         };
-        verify_seal(seal, &prev.authorized_signers, payload_bytes(payload)?)
+        let bytes = payload_bytes(payload)?;
+
+        // Path 1: the sitting roster's seal — always acceptable.
+        let by_prev = verify_seal(seal, &prev.authorized_signers, bytes.clone())?;
+        if matches!(by_prev, ValidateCallbackResult::Valid) {
+            return Ok(ValidateCallbackResult::Valid);
+        }
+
+        // Path 2: accession — only when the sitting roster's lease has
+        // expired, only for a roster-changing state, sealed by the
+        // INCOMING roster at its own φ⁻¹ threshold.
+        let expired = roster_expired(prev.roster_declared_at, state.attestation_count);
+        if expired && state.authorized_signers != prev.authorized_signers {
+            return verify_seal(seal, &state.authorized_signers, bytes);
+        }
+        Ok(by_prev) // report the original failure
     }
 }
 

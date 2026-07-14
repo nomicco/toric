@@ -2,10 +2,9 @@ manifest_version: '0'
 name: ledger
 integrity:
   network_seed: null
-  # PRODUCTION: set progenitor before launch —
-  # properties: { progenitor: "uhCAk..." }
-  # mutual_credit_integrity gates the first roster declaration to it.
-  properties: null
+  # Progenitor gates the first roster declaration (mutual_credit_integrity).
+  properties:
+    progenitor: "uhCAkBr8vGiJtsKAJ0TM7vf7JFP2i7PjeK62TaApohqkFySO8E7aX"
   zomes:
   - name: registry_integrity
     hash: null

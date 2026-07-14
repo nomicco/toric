@@ -414,3 +414,138 @@ test("warrant requires evidence hash — filing without evidence rejected", asyn
     }
   }, true, { disableLocalServices: true });
 });
+test("scored agents — the roster function's input has the right shape", async () => {
+  await runScenario(async (scenario: Scenario) => {
+    const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
+    await scenario.shareAllAgents();
+    const cell = alice.namedCells.get("ledger")!;
+    // Give the enumeration something to see.
+    await createAiModelManifest(cell);
+    const scored: Array<{ agent: Uint8Array; score: number }> = await cell.callZome({
+      zome_name: "registry",
+      fn_name: "get_scored_agents",
+      payload: null,
+    });
+    assert.isArray(scored, "Scored agents is a list");
+    for (const s of scored) {
+      assert.ok(s.agent, "Each entry carries an agent key");
+      assert.isNumber(s.score, "Each entry carries a numeric score");
+    }
+  }, true, { disableLocalServices: true });
+});
+
+test("latest closure — null before the network has ever observed itself", async () => {
+  await runScenario(async (scenario: Scenario) => {
+    const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
+    await scenario.shareAllAgents();
+    const result = await alice.namedCells.get("ledger")!.callZome({
+      zome_name: "registry",
+      fn_name: "get_latest_closure",
+      payload: null,
+    });
+    // No close_round has run — no manifest, no self-image yet. "No
+    // measurement" must stay distinct from "measured healthy".
+    assert.isNull(result, "No closure before the first closed round");
+  }, true, { disableLocalServices: true });
+});
+
+async function compare(cell: any, winner: ActionHash, loser: ActionHash,
+  margin = 200_000, cited: ActionHash[] = []): Promise<ActionHash> {
+  return cell.callZome({ zome_name: "registry", fn_name: "create_comparative_attestation",
+    payload: { winner_hash: winner, loser_hash: loser, margin_millionths: margin,
+      query_context: "test", cited_cycle: cited } });
+}
+
+test("comparative attestation round-trip: opposite-signed standing", async () => {
+  await runScenario(async (scenario: Scenario) => {
+    const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
+    await scenario.shareAllAgents();
+    const cell = alice.namedCells.get("ledger")!;
+    const a = await createAiModelManifest(cell);
+    const b = await createAiModelManifest(cell);
+    await compare(cell, a, b, 200_000);
+    const sa = await cell.callZome({ zome_name: "registry", fn_name: "get_comparative_standing", payload: a });
+    const sb = await cell.callZome({ zome_name: "registry", fn_name: "get_comparative_standing", payload: b });
+    assert.isAbove(sa.net_millionths, 0);
+    assert.isBelow(sb.net_millionths, 0);
+    assert.equal(sa.net_millionths, -sb.net_millionths);
+    assert.equal(sa.comparisons, 1);
+  }, true, { disableLocalServices: true });
+});
+
+test("self-comparison is rejected", async () => {
+  await runScenario(async (scenario: Scenario) => {
+    const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
+    await scenario.shareAllAgents();
+    const cell = alice.namedCells.get("ledger")!;
+    const a = await createAiModelManifest(cell);
+    try { await compare(cell, a, a); assert.fail("self-comparison must be rejected"); }
+    catch (e: any) { assert.match(String(e), /itself/); }
+  }, true, { disableLocalServices: true });
+});
+
+test("cited cycle: flat accepted, contradiction unwritable", async () => {
+  await runScenario(async (scenario: Scenario) => {
+    const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
+    await scenario.shareAllAgents();
+    const cell = alice.namedCells.get("ledger")!;
+    const [a, b, c] = [await createAiModelManifest(cell), await createAiModelManifest(cell), await createAiModelManifest(cell)];
+    const e1 = await compare(cell, a, b, 200_000); // a − b = 0.2
+    const e2 = await compare(cell, b, c, 200_000); // b − c = 0.2
+    // Flat closure: a − c = 0.4 citing both — residual 0, accepted.
+    const e3 = await compare(cell, a, c, 400_000, [e1, e2]);
+    assert.ok(e3);
+    // Contradiction: a − c = 0.9 citing the same path — residual
+    // 500_000 > φ⁻⁴ · 900_000 ≈ 131_306 → unwritable, loop named.
+    try { await compare(cell, a, c, 900_000, [e1, e2]); assert.fail("contradicting cycle must be rejected"); }
+    catch (e: any) { assert.match(String(e), /contradicts its cited cycle/); }
+  }, true, { disableLocalServices: true });
+});
+
+test("relational field: winner above, loser below, flat residual", async () => {
+  await runScenario(async (scenario: Scenario) => {
+    const alice = await scenario.addPlayerWithApp({ appBundleSource: { type: "path", value: happPath } });
+    await scenario.shareAllAgents();
+    const cell = alice.namedCells.get("ledger")!;
+    const a = await createAiModelManifest(cell);
+    const b = await createAiModelManifest(cell);
+    await createAttestation(cell, a); // give the component a real anchor score
+    await compare(cell, a, b, 200_000);
+    const ra = await cell.callZome({ zome_name: "registry", fn_name: "compute_relational_score", payload: a });
+    const rb = await cell.callZome({ zome_name: "registry", fn_name: "compute_relational_score", payload: b });
+    assert.equal(ra.component_size, 2);
+    assert.equal(ra.edge_count, 1);
+    // The single edge asserts a − b = 0.2: solved positions must differ
+    // by the margin (± integer-division quantum), residual flat.
+    assert.approximately(ra.relational_millionths - rb.relational_millionths, 200_000, 2);
+    assert.equal(ra.residual_millionths, 0);
+    assert.equal(rb.residual_millionths, 0);
+    // Isolated manifest degrades gracefully: relational = absolute.
+    const c = await createAiModelManifest(cell);
+    const rc = await cell.callZome({ zome_name: "registry", fn_name: "compute_relational_score", payload: c });
+    assert.equal(rc.component_size, 1);
+    assert.equal(rc.relational_millionths, rc.absolute_millionths);
+  }, true, { disableLocalServices: true });
+});
+
+test("dispute raises residual: opposing edges from a second agent", async () => {
+  await runScenario(async (scenario: Scenario) => {
+    const [alice, bob] = await scenario.addPlayersWithApps([
+      { appBundleSource: { type: "path", value: happPath } },
+      { appBundleSource: { type: "path", value: happPath } },
+    ]);
+    await scenario.shareAllAgents();
+    const ac = alice.namedCells.get("ledger")!;
+    const bc = bob.namedCells.get("ledger")!;
+    const a = await createAiModelManifest(ac);
+    const b = await createAiModelManifest(ac);
+    await new Promise((r) => setTimeout(r, 8000)); // DHT sync
+    await compare(ac, a, b, 300_000);
+    await compare(bc, b, a, 300_000); // bob flatly disagrees (no cited cycle: 2-cycle holonomy)
+    await new Promise((r) => setTimeout(r, 8000));
+    const ra = await ac.callZome({ zome_name: "registry", fn_name: "compute_relational_score", payload: a });
+    // Opposing equal-weight edges collapse to zero mean margin —
+    // residual reports the full contradiction mass.
+    assert.isAbove(ra.residual_millionths, 0);
+  }, true, { disableLocalServices: true });
+});

@@ -252,6 +252,10 @@ struct CloseRoundInput {
 struct CloseRoundResult {
     network_state_manifest_hash: ActionHash,
     passed: bool,
+    /// False when the drift gate held and the standing manifest was
+    /// reused (registry-side field; defaulted for older peers).
+    #[serde(default)]
+    manifest_written: bool,
 }
 
 fn close_round(

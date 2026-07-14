@@ -236,8 +236,36 @@ fn validate_create_warrant(
 }
 fn validate_create_reputation_cache(
     _action: Create,
-    _cache: ReputationCache,
+    cache: ReputationCache,
 ) -> ExternResult<ValidateCallbackResult> {
+    // The score VALUE cannot be law-validated: it is a function of the
+    // agent's complete attestation/warrant set, and completeness is not
+    // provable in deterministic validation (link enumeration is
+    // non-deterministic). That impossibility is why sealed CreditLimits
+    // exist. Authorship cannot be pinned either — penalty and
+    // commit/reveal counter updates are legitimately written by agents
+    // OTHER than the subject, so `cache.agent == author` would break
+    // real flows. What law CAN do: bound the representation, so a
+    // forged cache can at most claim a perfect score (1.0 in ppm),
+    // never u32::MAX — keeping every downstream arithmetic consumer
+    // (credit_limit_for_reputation) in range by construction.
+    const SCORE_PPM_DENOM: u32 = 1_000_000; // mirrors toric_geometry::SCORE_PPM_DENOM
+    if cache.score > SCORE_PPM_DENOM {
+        return Ok(ValidateCallbackResult::Invalid(format!(
+            "ReputationCache.score {} exceeds the fixed-point range [0, {}]",
+            cache.score, SCORE_PPM_DENOM
+        )));
+    }
+    if cache.score_delta.unsigned_abs() > SCORE_PPM_DENOM {
+        return Ok(ValidateCallbackResult::Invalid(
+            "ReputationCache.score_delta outside the fixed-point range".into(),
+        ));
+    }
+    if cache.total_reveals > cache.total_commits {
+        return Ok(ValidateCallbackResult::Invalid(
+            "ReputationCache cannot record more reveals than commits".into(),
+        ));
+    }
     Ok(ValidateCallbackResult::Valid)
 }
 

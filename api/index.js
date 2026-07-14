@@ -2,6 +2,8 @@ import { AppWebsocket, AdminWebsocket } from "@holochain/client";
 import express from "express";
 import cors from "cors";
 import { fileURLToPath } from "url";
+import { SearchIndex, search as toricSearch, render as renderSearch } from "./toric-search.js";
+import { ingest as toricIngest, ingestBatch as toricIngestBatch } from "./toric-ingest.js";
 import { dirname, join } from "path";
 
 const app = express();
@@ -279,6 +281,48 @@ v1.get("/agent/:pubkey/attestations", async (req, res) => {
 // v1 — Manifests
 // ─────────────────────────────────────────────
 
+// POST /v1/attest/compare {winner_hash, loser_hash, margin_millionths, query_context, cited_cycle?}
+v1.post("/attest/compare", async (req, res) => {
+  try {
+    const { winner_hash, loser_hash, margin_millionths, query_context, cited_cycle } = req.body;
+    if (!winner_hash || !loser_hash) return res.status(400).json({ error: "winner_hash and loser_hash required" });
+    const hash = await registryCall("create_comparative_attestation", {
+      winner_hash: Buffer.from(winner_hash, "base64url"),
+      loser_hash: Buffer.from(loser_hash, "base64url"),
+      margin_millionths: margin_millionths ?? 618_034,
+      query_context: query_context || "",
+      cited_cycle: (cited_cycle || []).map(h => Buffer.from(h, "base64url")),
+    });
+    res.status(201).json({ hash: toBase64(hash) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// GET /v1/manifest/:hash/relational — score as position in the solved
+// difference field: {absolute, relational, residual (local holonomy),
+// component_size}. residual near 0 = the neighborhood agrees; high =
+// this score sits inside a live dispute.
+v1.get("/manifest/:hash/relational", async (req, res) => {
+  try {
+    const r = await registryCall("compute_relational_score", Buffer.from(req.params.hash, "base64url"));
+    res.json({
+      manifest_hash: req.params.hash,
+      absolute: r.absolute_millionths / 1e6,
+      relational: r.relational_millionths / 1e6,
+      residual: r.residual_millionths / 1e6,
+      component_size: r.component_size,
+      edge_count: r.edge_count,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /v1/manifest/:hash/standing — reputation-weighted net preference
+v1.get("/manifest/:hash/standing", async (req, res) => {
+  try {
+    const s = await registryCall("get_comparative_standing", Buffer.from(req.params.hash, "base64url"));
+    res.json({ ...s, manifest_hash: req.params.hash, net: s.net_millionths / 1e6 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 v1.post("/manifest", async (req, res) => {
   try {
     const { blob } = req.body;
@@ -380,6 +424,109 @@ v1.get("/content/:hash/manifests", async (req, res) => {
     });
     res.json((hashes || []).map(toBase64));
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /v1/query {pinned_manifest, assertions?: [{better, worse, margin_millionths}]}
+// The COMPLETE step: verdict = entailed | asker_conflict | record_dispute,
+// solved positions as the answer, residuals as the receipts.
+v1.post("/query", async (req, res) => {
+  try {
+    const { pinned_manifest, assertions } = req.body;
+    if (!pinned_manifest) return res.status(400).json({ error: "pinned_manifest required" });
+    const r = await registryCall("query_completion", {
+      pinned_manifest: Buffer.from(pinned_manifest, "base64url"),
+      assertions: (assertions || []).map(a => ({
+        better: Buffer.from(a.better, "base64url"),
+        worse: Buffer.from(a.worse, "base64url"),
+        margin_millionths: a.margin_millionths ?? 200_000,
+      })),
+    });
+    res.json({
+      verdict: r.verdict,
+      completions: r.completions.map(([h, v]) => ({ manifest: toBase64(h), position: v / 1e6 })),
+      residual_with: r.residual_with / 1e6,
+      residual_without: r.residual_without / 1e6,
+      component_size: r.component_size,
+      edge_count: r.edge_count,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Search: relevance × authority over registered content ──
+let _searchIndex = null;
+let _searchIndexAt = 0;
+const SEARCH_INDEX_TTL_MS = 15_000;
+
+async function getSearchIndex() {
+  if (_searchIndex && Date.now() - _searchIndexAt < SEARCH_INDEX_TTL_MS) return _searchIndex;
+  const hashes = await registryCall("get_all_manifests", null);
+  const docs = await Promise.all(
+    (hashes || []).map(async (h) => {
+      try {
+        const [manifest, trustScore] = await Promise.all([
+          registryCall("get_manifest", h),
+          registryCall("compute_trust_score", { manifest_hash: h }).catch(() => null),
+        ]);
+        return {
+          hash: toBase64(h),
+          entry: formatRecord(manifest)?.entry || null,
+          author: toBase64(manifest?.signed_action?.hashed?.content?.author),
+          score: trustScore?.score ?? 0,
+          attestation_count: trustScore?.attestation_count ?? 0,
+          passes: trustScore?.passes ?? false,
+        };
+      } catch (e) { return null; }
+    })
+  );
+  _searchIndex = new SearchIndex().build(docs.filter(Boolean));
+  _searchIndexAt = Date.now();
+  return _searchIndex;
+}
+
+// GET /v1/search?q=vision+model+passes:true&limit=10 — ranked results
+// (relevance × trust), margin-rule confidence verdict, cited rendering.
+v1.get("/search", async (req, res) => {
+  try {
+    const q = req.query.q || "";
+    if (!q.trim()) return res.status(400).json({ error: "q required" });
+    const index = await getSearchIndex();
+    const result = toricSearch(index, q, { limit: Math.min(parseInt(req.query.limit) || 10, 50) });
+    res.json({ ...result, rendered: renderSearch(result, q) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /v1/ingest {url, source_type?, ingested_by?} — the membrane
+// door: fetch one external resource, hash it, register as an ordinary
+// Manifest. No attestation, no trust assigned — it earns standing the
+// same way everything else does.
+v1.post("/ingest", async (req, res) => {
+  try {
+    const { url, source_type, ingested_by } = req.body;
+    if (!url) return res.status(400).json({ error: "url required" });
+    const registerFn = (blob) => registryCall("create_manifest", { blob });
+    const { manifestHash, contentHash } = await toricIngest(url, registerFn, {
+      sourceType: source_type || "url",
+      ingestedBy: ingested_by || "api:anonymous",
+    });
+    res.status(201).json({ hash: toBase64(manifestHash), content_hash: contentHash });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// POST /v1/ingest/batch {urls: [...]} — per-item isolation.
+v1.post("/ingest/batch", async (req, res) => {
+  try {
+    const { urls, source_type, ingested_by } = req.body;
+    if (!Array.isArray(urls) || urls.length === 0)
+      return res.status(400).json({ error: "urls (non-empty array) required" });
+    const registerFn = (blob) => registryCall("create_manifest", { blob });
+    const results = await toricIngestBatch(urls, registerFn, {
+      sourceType: source_type || "url",
+      ingestedBy: ingested_by || "api:anonymous",
+    });
+    res.json(results.map(r => r.ok
+      ? { url: r.url, ok: true, hash: toBase64(r.manifestHash), content_hash: r.contentHash }
+      : { url: r.url, ok: false, error: r.error }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 v1.get("/manifests", async (req, res) => {
