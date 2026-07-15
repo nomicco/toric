@@ -1,3 +1,4 @@
+
 // ui/src/toric-client.js — dual-mode transport for the Toric UI.
 // Kangaroo/launcher mode: __HC_LAUNCHER_ENV__ present -> direct zome calls.
 // Browser mode (dev.sh + Express API): fetch fallback, unchanged behavior.
@@ -128,6 +129,64 @@ async function route(path, opts) {
       manifest_hash: unb64(body.manifest_hash),
       blob: enc.encode(JSON.stringify(body.blob)),
     });
+    return { hash: b64(hash) };
+  }
+
+  if (path === '/agents') {
+    // Discovery evidence: every agent the DHT has scored records for.
+    const scored = await registry('get_scored_agents', null);
+    return (scored || []).map(a => ({ agent: b64(a.agent), score: a.score ?? 0 }));
+  }
+
+  if (path.startsWith('/manifest/') && path.endsWith('/relational')) {
+    const hash = decodeURIComponent(path.slice('/manifest/'.length, -'/relational'.length));
+    const r = await registry('compute_relational_score', unb64(hash));
+    return {
+      manifest_hash: hash,
+      absolute_millionths: r.absolute_millionths,
+      relational_millionths: r.relational_millionths,
+      residual_millionths: r.residual_millionths,
+      component_size: r.component_size,
+      edge_count: r.edge_count,
+    };
+  }
+
+  if (path.startsWith('/manifest/') && path.endsWith('/standing')) {
+    const hash = decodeURIComponent(path.slice('/manifest/'.length, -'/standing'.length));
+    const s = await registry('get_comparative_standing', unb64(hash));
+    return { manifest_hash: hash, net_millionths: s.net_millionths, comparisons: s.comparisons };
+  }
+
+  if (path === '/attest/compare' && opts?.method === 'POST') {
+    const hash = await registry('create_comparative_attestation', {
+      winner_hash: unb64(body.winner_hash),
+      loser_hash: unb64(body.loser_hash),
+      margin_millionths: body.margin_millionths ?? 200000,
+      query_context: body.query_context || 'ui',
+      cited_cycle: (body.cited_cycle || []).map(unb64),
+    });
+    return { hash: b64(hash) };
+  }
+
+  if (path === '/query' && opts?.method === 'POST') {
+    const r = await registry('query_completion', {
+      pinned_manifest: unb64(body.pinned_manifest),
+      assertions: (body.assertions || []).map(a => ({
+        better: unb64(a.better), worse: unb64(a.worse),
+        margin_millionths: a.margin_millionths ?? 200000,
+      })),
+    });
+    return {
+      verdict: r.verdict,
+      completions: r.completions.map(([h, v]) => ({ manifest: b64(h), position_millionths: v })),
+      residual_with_millionths: r.residual_with,
+      residual_without_millionths: r.residual_without,
+      component_size: r.component_size, edge_count: r.edge_count,
+    };
+  }
+
+  if (path === '/roster/declare' && opts?.method === 'POST') {
+    const hash = await mutualCredit('declare_signer_roster', null);
     return { hash: b64(hash) };
   }
 

@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -29,7 +30,7 @@ body{background:var(--void);color:var(--ink);font-family:var(--sans);font-size:1
 header{display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--panel2)}
 .wordmark{font-family:var(--disp);font-weight:700;font-size:20px;letter-spacing:.12em}
 .wordmark b{color:var(--gold);font-weight:700}
-.chip{font-family:var(--mono);font-size:12px;color:var(--dim);background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:4px 10px;max-width:560px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.chip{font-family:var(--mono);font-size:12px;color:var(--dim);background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:4px 10px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .badge{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;padding:4px 10px;border-radius:3px;border:1px solid var(--line)}
 .badge.phase{color:var(--gold);border-color:rgba(201,162,39,.4)}
 .spacer{flex:1}
@@ -128,6 +129,7 @@ footer span b{color:var(--ink);font-weight:400}
   <div class="wordmark">T<b>O</b>RIC</div>
   <div class="chip" id="me" title="Agent public key">agent —</div>
   <div class="badge phase" id="phase">phase —</div>
+  <div class="chip" id="peers" title="Agents with scored DHT records — discovery evidence">peers —</div>
   <div class="spacer"></div>
   <div id="conn"><span class="dot"></span><span id="conn-label">connecting</span></div>
 </header>
@@ -165,8 +167,11 @@ footer span b{color:var(--ink);font-weight:400}
       <h2>Sovereignty</h2>
       <div class="sov-head">
         <div class="divergence">roster ↔ reputation divergence <span class="dv" id="divergence">—</span></div>
+        <div class="divergence">sovereignty lease <span class="dv" id="lease">—</span></div>
       </div>
       <div class="roster-list" id="roster"></div>
+      <div class="formrow"><button class="ghost" id="declare-roster">Declare roster from reputation</button>
+        <div class="msg" id="roster-msg"></div></div>
     </section>
   </div>
 
@@ -174,7 +179,7 @@ footer span b{color:var(--ink);font-weight:400}
   <section class="full">
     <h2>Registry <span class="val" id="manifest-count"></span></h2>
     <table>
-      <thead><tr><th>Manifest</th><th>Author</th><th>Trust score</th><th>Attestations</th><th></th></tr></thead>
+      <thead><tr><th>Manifest</th><th>Author</th><th>Trust score</th><th>Standing</th><th>Attestations</th><th></th></tr></thead>
       <tbody id="manifest-rows"></tbody>
     </table>
     <div class="empty" id="manifest-empty" hidden>No manifests yet — register the first artifact below.</div>
@@ -185,6 +190,48 @@ footer span b{color:var(--ink);font-weight:400}
       </div>
       <button id="submit-manifest">Register manifest</button>
     </div>
+
+    <!-- ── Relational field detail: raw millionths — the determinism check.
+         Two machines must show IDENTICAL integers here, not close ones. ── -->
+    <div class="msg" id="field-detail" style="min-height:0"></div>
+
+    <!-- ── Comparative attestation composer ── -->
+    <h2 style="margin-top:22px">Compare <span class="val">staked difference claims</span></h2>
+    <div class="formrow">
+      <div class="formcol">
+        <select id="cmp-winner"></select>
+        <div class="msg" style="min-height:0">better</div>
+      </div>
+      <div class="formcol">
+        <select id="cmp-loser"></select>
+        <div class="msg" style="min-height:0">worse</div>
+      </div>
+      <div class="formcol" style="max-width:170px">
+        <input type="text" id="cmp-margin" value="200000" spellcheck="false"/>
+        <div class="msg" style="min-height:0">margin (millionths)</div>
+      </div>
+    </div>
+    <div class="formrow">
+      <div class="formcol">
+        <input type="text" id="cmp-cycle" placeholder="cited cycle: attestation hashes, comma-separated (optional)" spellcheck="false"/>
+        <div class="msg" id="cmp-msg"></div>
+      </div>
+      <button id="submit-compare">Compare</button>
+    </div>
+
+    <!-- ── Witness: pin a frame, ask what the record entails ── -->
+    <h2 style="margin-top:22px">Witness <span class="val">completion by residual</span></h2>
+    <div class="formrow">
+      <div class="formcol"><select id="q-pin"></select>
+        <div class="msg" style="min-height:0">gauge pin (the frame)</div></div>
+      <div class="formcol"><select id="q-better"><option value="">— no assertion —</option></select>
+        <div class="msg" style="min-height:0">assert better (optional)</div></div>
+      <div class="formcol"><select id="q-worse"><option value="">—</option></select>
+        <div class="msg" style="min-height:0">assert worse</div></div>
+      <button id="submit-query">Ask</button>
+    </div>
+    <div class="msg" id="q-verdict"></div>
+    <div class="roster-list" id="q-completions"></div>
   </section>
 </main>
 
@@ -212,6 +259,7 @@ const PROBES = [
   {id:5, name:'Supply position',     domain:'econ'},
   {id:6, name:'Roster conformance',  domain:'econ'},
   {id:7, name:'Frozen fraction',     domain:'econ'},
+  {id:8, name:'Holonomy',            domain:'rel'},
 ];
 
 // ── the closure ring: the network's self-image ──
@@ -223,7 +271,7 @@ function drawRing(signals){
   const byId = {}; (signals||[]).forEach(s => byId[s.probe_id] = s);
   let paths = '';
   PROBES.forEach((p, i) => {
-    const ang = (-90 + i * (360/7)) * Math.PI/180;
+    const ang = (-90 + i * (360/PROBES.length)) * Math.PI/180;
     const sig = byId[p.id];
     const dev = sig ? Math.min(1, sig.deviation_magnitude / INV_PHI) : 0;
     const r = hub + rMax * dev;
@@ -232,7 +280,8 @@ function drawRing(signals){
     const lx = C + (rFail+16)*Math.cos(ang), ly = C + (rFail+16)*Math.sin(ang);
     const col = p.dormant || !sig ? 'var(--line)'
               : dev >= 1 ? 'var(--warn)'
-              : p.domain === 'econ' ? 'var(--gold)' : 'var(--phos)';
+              : p.domain === 'econ' ? 'var(--gold)'
+              : p.domain === 'rel'  ? 'var(--ink)' : 'var(--phos)';
     paths += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="3" stroke-linecap="round"/>`;
     paths += `<circle cx="${x2}" cy="${y2}" r="3.4" fill="${col}"/>`;
     paths += `<text x="${lx}" y="${ly}" fill="var(--dim)" font-size="10" font-family="IBM Plex Mono" text-anchor="middle" dominant-baseline="middle">${p.id}</text>`;
@@ -284,23 +333,8 @@ async function loadIdentity(){
   try {
     const { agent } = await j('/agent/me');
     ME = agent;
-    $('me').textContent = agent;
+    $('me').textContent = short(agent, 18);
     $('me').title = agent;
-    // Click-to-copy full key
-    $('me').onclick = function() {
-      var ta = document.createElement('textarea');
-      ta.value = agent;
-      ta.style.cssText = 'position:fixed;left:-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-      var el = $('me');
-      var orig = el.textContent;
-      el.textContent = 'copied!';
-      el.style.color = 'var(--phos)';
-      setTimeout(function() { el.textContent = orig; el.style.color = ''; }, 1200);
-    };
   } catch(e){}
 }
 
@@ -329,9 +363,20 @@ async function refreshState(){
     $('fib-next').textContent = `expansion at ${next}`;
     // roster from state
     const roster = st.authorized_signers || [];
+    const totalMass = roster.reduce((s, r) => s + (r.mass ?? 0), 0) || 1;
     $('roster').innerHTML = roster.length
-      ? roster.map(r => `<div class="member" title="${r}">${short(String(r), 22)}</div>`).join('')
+      ? roster.map(r => {
+          const key = r.agent ?? r; // seats are {agent, mass}; tolerate legacy keys
+          const mass = r.mass != null ? ` · ${(100 * r.mass / totalMass).toFixed(1)}% mass` : '';
+          return `<div class="member" title="${key}">${short(String(key), 22)}${mass}</div>`;
+        }).join('')
       : `<div class="empty">No roster declared — the network is in bootstrap; sovereignty activates with the first declaration.</div>`;
+    // Sovereignty lease: rounds remaining before the derived roster may accede.
+    const declaredAt = st.roster_declared_at ?? 0, attn = st.attestation_count ?? 0;
+    const leaseLeft = roster.length ? Math.max(0, 21 - (attn - declaredAt)) : null;
+    const lz = $('lease');
+    lz.textContent = leaseLeft === null ? '—' : leaseLeft === 0 ? 'EXPIRED — accession open' : `${leaseLeft} rounds`;
+    lz.classList.toggle('hot', leaseLeft === 0);
   } catch(e){}
 }
 
@@ -380,9 +425,40 @@ async function refreshReputation(){
   } catch(e){}
 }
 
+let MANIFESTS = [];
+async function refreshPeers(){
+  try {
+    const agents = await j('/agents');
+    $('peers').textContent = `peers ${agents.length}`;
+    $('peers').title = agents.map(a => `${a.agent.slice(0,16)}… score ${(a.score ?? 0).toFixed(3)}`).join('\n') || 'no scored agents yet';
+  } catch(e){}
+}
+
+async function refreshStandings(list){
+  await Promise.all(list.map(async m => {
+    try {
+      const s = await j(`/manifest/${encodeURIComponent(m.hash)}/standing`);
+      const el = document.querySelector(`[data-standing="${m.hash}"]`);
+      if (!el) return;
+      if (!s.comparisons) { el.textContent = '—'; return; }
+      const net = s.net_millionths / 1e6;
+      el.innerHTML = `<span class="${net >= 0 ? 'pass' : 'nopass'}">${net >= 0 ? '+' : ''}${net.toFixed(3)}</span> <span style="color:var(--dim)">(${s.comparisons})</span>`;
+    } catch(e){}
+  }));
+}
+
+function fillSelectors(list){
+  const opts = list.map(m => `<option value="${m.hash}">${(m.entry?.name || m.entry?.model_id || m.hash.slice(0,18))} · ${(m.score ?? 0).toFixed(3)}</option>`).join('');
+  ['cmp-winner','cmp-loser','q-pin'].forEach(id => { $(id).innerHTML = opts; });
+  ['q-better','q-worse'].forEach(id => { $(id).innerHTML = '<option value="">—</option>' + opts; });
+}
+
 async function refreshManifests(){
   try {
     const list = await j('/manifests');
+    MANIFESTS = list;
+    fillSelectors(list);
+    refreshStandings(list);
     $('manifest-count').textContent = `${list.length} registered`;
     $('manifest-empty').hidden = list.length > 0;
     $('manifest-rows').innerHTML = list.map(m => `
@@ -390,8 +466,10 @@ async function refreshManifests(){
         <td class="hash" title="${m.hash}">${short(m.hash, 20)}</td>
         <td class="hash" title="${m.author}">${short(m.author, 14)}</td>
         <td><span class="score">${(m.score ?? 0).toFixed(3)}</span> <span class="${m.passes ? 'pass':'nopass'}">${m.passes ? '· passes' : ''}</span></td>
+        <td class="standing" data-standing="${m.hash}">—</td>
         <td>${m.attestation_count ?? 0}</td>
-        <td><button class="ghost" data-attest="${m.hash}">Attest</button></td>
+        <td><button class="ghost" data-attest="${m.hash}">Attest</button>
+            <button class="ghost" data-field="${m.hash}">Field</button></td>
       </tr>`).join('');
   } catch(e){}
 }
@@ -408,6 +486,83 @@ $('manifest-rows').addEventListener('click', async ev => {
     ev.target.textContent = 'Failed';
     ev.target.title = e.message;
   }
+});
+
+$('manifest-rows').addEventListener('click', async ev => {
+  const hash = ev.target?.dataset?.field;
+  if (!hash) return;
+  const el = $('field-detail');
+  el.className = 'msg'; el.textContent = 'solving field…';
+  try {
+    const r = await j(`/manifest/${encodeURIComponent(hash)}/relational`);
+    // RAW integers on purpose: cross-machine determinism is checked by
+    // string equality of this line, never by "close enough".
+    el.innerHTML = `field[${short(hash,14)}] absolute <b>${r.absolute_millionths}</b> · relational <b>${r.relational_millionths}</b> · residual <b class="${r.residual_millionths > 0 ? 'fail' : ''}">${r.residual_millionths}</b> · component ${r.component_size} · edges ${r.edge_count} <span style="color:var(--dim)">(millionths — must match exactly on every node)</span>`;
+    el.classList.add(r.residual_millionths > 145898 ? 'err' : 'ok');
+  } catch(e){ el.textContent = e.message; el.classList.add('err'); }
+});
+
+$('submit-compare').addEventListener('click', async () => {
+  const msg = $('cmp-msg');
+  msg.className = 'msg';
+  const winner = $('cmp-winner').value, loser = $('cmp-loser').value;
+  if (!winner || !loser) { msg.textContent = 'Pick two manifests.'; msg.classList.add('err'); return; }
+  if (winner === loser) { msg.textContent = 'A thing cannot outrank itself.'; msg.classList.add('err'); return; }
+  const cited = $('cmp-cycle').value.split(',').map(s => s.trim()).filter(Boolean);
+  $('submit-compare').disabled = true;
+  try {
+    const { hash } = await j('/attest/compare', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ winner_hash: winner, loser_hash: loser,
+        margin_millionths: parseInt($('cmp-margin').value) || 200000,
+        query_context: 'ui', cited_cycle: cited })});
+    msg.textContent = `Edge written ${short(hash, 18)}`;
+    msg.classList.add('ok');
+    refreshStandings(MANIFESTS);
+  } catch(e) {
+    // Cycle rejections land here VERBATIM — the fired-loop error is
+    // the artifact the multinode test wants to see.
+    msg.textContent = e.message;
+    msg.classList.add('err');
+  }
+  $('submit-compare').disabled = false;
+});
+
+$('submit-query').addEventListener('click', async () => {
+  const v = $('q-verdict'), comps = $('q-completions');
+  v.className = 'msg'; v.textContent = 'solving…'; comps.innerHTML = '';
+  const pin = $('q-pin').value;
+  if (!pin) { v.textContent = 'Pin a manifest — a question must choose its frame.'; v.classList.add('err'); return; }
+  const better = $('q-better').value, worse = $('q-worse').value;
+  const assertions = (better && worse && better !== worse)
+    ? [{ better, worse, margin_millionths: 200000 }] : [];
+  try {
+    const r = await j('/query', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ pinned_manifest: pin, assertions })});
+    const verdictLine = {
+      entailed: `<b>entailed</b> — the record answers this. Residual ${r.residual_with_millionths} millionths.`,
+      asker_conflict: `<b class="fail">asker conflict</b> — your assertion fights the record (with: ${r.residual_with_millionths}, without: ${r.residual_without_millionths}). The conflict is the answer.`,
+      record_dispute: `<b class="fail">record dispute</b> — the network itself disagrees here (open holonomy ${r.residual_without_millionths}). Abstaining; this is a bounty, not a failure.`,
+    }[r.verdict] || r.verdict;
+    v.innerHTML = verdictLine;
+    v.classList.add(r.verdict === 'entailed' ? 'ok' : 'err');
+    const nameOf = h => (MANIFESTS.find(m => m.hash === h)?.entry?.name) || h.slice(0, 18) + '…';
+    comps.innerHTML = r.completions
+      .sort((a, b) => b.position_millionths - a.position_millionths)
+      .map(c => `<div class="member" title="${c.manifest}">${nameOf(c.manifest)} · <b>${c.position_millionths}</b></div>`).join('');
+  } catch(e){ v.textContent = e.message; v.classList.add('err'); }
+});
+
+$('declare-roster').addEventListener('click', async () => {
+  const msg = $('roster-msg');
+  msg.className = 'msg';
+  $('declare-roster').disabled = true;
+  try {
+    const { hash } = await j('/roster/declare', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) });
+    msg.textContent = `Roster declared ${short(hash, 16)} — sealing active.`;
+    msg.classList.add('ok');
+    refreshState();
+  } catch(e) { msg.textContent = e.message; msg.classList.add('err'); }
+  $('declare-roster').disabled = false;
 });
 
 $('submit-manifest').addEventListener('click', async () => {
@@ -440,7 +595,7 @@ async function loadHashes(){
 }
 
 function refreshAll(){
-  refreshState(); refreshEconomy(); refreshClosure(); refreshReputation(); refreshManifests(); loadHashes();
+  refreshState(); refreshEconomy(); refreshClosure(); refreshReputation(); refreshManifests(); refreshPeers(); loadHashes();
 }
 
 // ── loop: fast until connected, then steady instrument cadence ──
@@ -449,7 +604,7 @@ function refreshAll(){
   setTimeout(boot, up ? 8000 : 2000);
 })();
 setInterval(() => { if ($('conn').classList.contains('up')) { refreshState(); refreshEconomy(); refreshClosure(); } }, 8000);
-setInterval(() => { if ($('conn').classList.contains('up')) { refreshManifests(); refreshReputation(); } }, 15000);
+setInterval(() => { if ($('conn').classList.contains('up')) { refreshManifests(); refreshReputation(); refreshPeers(); } }, 15000);
 </script>
 </body>
 </html>
